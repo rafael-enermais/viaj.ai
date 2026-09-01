@@ -2,3 +2,4 @@ streamlit==1.62.0
 supabase==2.9.1
 anthropic
 python-dotenv
+openpyxl==3.1.5
