@@ -1,4 +1,4 @@
-# Viaj.AI — v0.7 (Confirmar folgas editavel direto na tabela + historico) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v0.7.1 (tira falsos checkboxes de Previsao/Pendencias, sem RPC de escrita por tras) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -286,7 +286,16 @@ def pagina_importar_re090(supabase):
     st.subheader("Pendências abertas")
     pend = supabase.rpc("viajai_listar_pendencias_import", {"p_apenas_nao_resolvidas": True}).execute()
     if pend.data:
-        st.dataframe(pend.data)
+        st.caption(
+            "Só leitura por enquanto — marcar pendência como resolvida ainda "
+            "não tem tela (fica pra depois, ver 00-handoff)."
+        )
+        df_pend = pd.DataFrame(pend.data)
+        # tira "resolvido" (sempre False aqui, a RPC ja filtra nao-resolvidas
+        # -- so confundia como um checkbox clicavel que na pratica nao fazia
+        # nada, st.dataframe nunca aceita edicao) e "origem" (sempre 're090').
+        df_pend = df_pend.drop(columns=[c for c in ["resolvido", "origem"] if c in df_pend.columns])
+        st.dataframe(df_pend, use_container_width=True, hide_index=True)
     else:
         st.caption("Nenhuma pendência em aberto.")
 
@@ -431,7 +440,14 @@ def pagina_previsao(supabase):
         "obra_nome", "canteiro_nome",
     ]
     colunas_principais = [c for c in colunas_principais if c in df.columns]
-    outras = [c for c in df.columns if c not in colunas_principais]
+    # colunas tecnicas (ids, flags internas de ordenacao/filtro) e
+    # "urgencia_manual" (falso checkbox - RPC de escrita ja existe mas
+    # nenhuma tela chama ainda, ver 00-handoff) ficam de fora da tabela.
+    colunas_ocultas = {
+        "colaborador_id", "obra_id", "canteiro_id",
+        "data_base_retorno", "tem_historico", "urgencia_manual",
+    }
+    outras = [c for c in df.columns if c not in colunas_principais and c not in colunas_ocultas]
     df = df[colunas_principais + outras]
 
     st.dataframe(df, use_container_width=True, hide_index=True)
