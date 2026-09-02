@@ -1,4 +1,4 @@
-# Viaj.AI — v1.0 (Custo & Passagens: registro por folga + lancamento rapido + comparativos) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v1.1 (previsao de gasto por colaborador + KPI 30d + gasto por periodo + UX simplificada) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -74,6 +74,35 @@ ALIASES_COLUNA = {
     "termino da folga": "termino_folga",
     "término da folga": "termino_folga",
 }
+
+# Codigo IATA por cidade (fato estavel de aviacao, nao preco/horario - sem
+# risco de ficar desatualizado do jeito que preco fica). So' as capitais/
+# hubs mais comuns; se a cidade digitada nao estiver aqui, usuario digita
+# o codigo direto (ex.: "FOR") que a funcao abaixo aceita igual.
+_IATA_CIDADES = {
+    "fortaleza": "FOR", "sao paulo": "GRU", "são paulo": "GRU",
+    "rio de janeiro": "GIG", "salvador": "SSA", "recife": "REC",
+    "brasilia": "BSB", "brasília": "BSB", "belo horizonte": "CNF",
+    "curitiba": "CWB", "porto alegre": "POA", "manaus": "MAO",
+    "belem": "BEL", "belém": "BEL", "vitoria": "VIX", "vitória": "VIX",
+    "natal": "NAT", "joao pessoa": "JPA", "joão pessoa": "JPA",
+    "maceio": "MCZ", "maceió": "MCZ", "aracaju": "AJU", "teresina": "THE",
+    "sao luis": "SLZ", "são luís": "SLZ", "cuiaba": "CGB", "cuiabá": "CGB",
+    "campo grande": "CGR", "goiania": "GYN", "goiânia": "GYN",
+    "florianopolis": "FLN", "florianópolis": "FLN",
+}
+
+
+def _resolver_iata(texto):
+    """Aceita nome de cidade (casa pelo dicionario acima) ou codigo IATA
+    direto (3 letras) - devolve o codigo em maiusculo, ou string vazia se
+    nao reconhecer nem uma coisa nem outra (usuario ve e corrige)."""
+    if not texto:
+        return ""
+    limpo = texto.strip()
+    if len(limpo) == 3 and limpo.isalpha():
+        return limpo.upper()
+    return _IATA_CIDADES.get(limpo.lower(), "")
 
 
 def _botao_exportar_excel(df, nome_arquivo, label="Exportar Excel"):
@@ -491,6 +520,41 @@ def pagina_previsao(supabase):
 
     df = pd.DataFrame(resp.data)
 
+    # previsao de gasto por colaborador (schema_v0.15): media do proprio
+    # historico, cai pra media do canteiro, depois da obra, se nao tiver -
+    # pedido do Rafael (02/09) pra dar valor em R$ nessa tabela tambem.
+    gasto_resp = supabase.rpc("viajai_previsao_gasto_colaborador").execute()
+    if gasto_resp.data:
+        df_gasto = pd.DataFrame(gasto_resp.data)
+        df = df.merge(df_gasto, on="colaborador_id", how="left")
+    else:
+        df["previsao_gasto"] = None
+        df["base_previsao"] = "sem_dado"
+
+    # painel resumido (pedido do Rafael: "dimensionar quantos funcionarios
+    # precisarao de passagem nos proximos 30 dias" + gasto previsto) - usa
+    # o df ANTES do filtro de "mostrar sem historico" (precisa de
+    # dias_restantes calculado, que so existe pra quem tem historico).
+    _janela_30d = df[
+        df["dias_restantes"].notna()
+        & (df["dias_restantes"] >= 0)
+        & (df["dias_restantes"] <= 30)
+    ]
+    _qtd_30d = len(_janela_30d)
+    _com_previsao = _janela_30d["previsao_gasto"].notna().sum() if _qtd_30d else 0
+    _gasto_30d = _janela_30d["previsao_gasto"].sum(skipna=True) if _qtd_30d else 0
+    kpi1, kpi2 = st.columns(2)
+    kpi1.metric("Precisando de passagem (próx. 30 dias)", _qtd_30d)
+    if _com_previsao:
+        kpi2.metric(
+            "Gasto previsto pra esse período",
+            f"R$ {_gasto_30d:,.2f}",
+            help=f"Baseado em {_com_previsao} de {_qtd_30d} pessoa(s) com histórico de custo — o resto ainda não tem base pra estimar.",
+        )
+    else:
+        kpi2.metric("Gasto previsto pra esse período", "sem dado ainda")
+    st.divider()
+
     mostrar_sem_historico = st.checkbox(
         "Mostrar também quem ainda não tem nenhuma folga registrada "
         "(sem previsão calculável ainda)",
@@ -532,7 +596,7 @@ def pagina_previsao(supabase):
     colunas_principais = [
         "nome", "situacao", "dias_restantes",
         "data_saida_prevista", "data_retorno_prevista",
-        "obra_nome", "canteiro_nome", "override_manual",
+        "obra_nome", "canteiro_nome", "previsao_gasto", "base_previsao", "override_manual",
     ]
     colunas_principais = [c for c in colunas_principais if c in df.columns]
     # colunas tecnicas (ids, flags internas de ordenacao/filtro) ficam de
@@ -557,6 +621,14 @@ def pagina_previsao(supabase):
                 "Override manual",
                 options=[_UO_AUTOMATICO, "critico", "atencao", "normal"],
                 required=True,
+            ),
+            "previsao_gasto": st.column_config.NumberColumn(
+                "Previsão de gasto",
+                format="R$ %.2f",
+                help="Média do custo histórico (da própria pessoa; sem isso, do canteiro; sem isso, da obra) — ver coluna 'Base'.",
+            ),
+            "base_previsao": st.column_config.TextColumn(
+                "Base", help="De onde veio a previsão: colaborador, canteiro, obra ou sem_dado (nunca registrado nada ainda)."
             ),
         },
         disabled=[c for c in df.columns if c != "override_manual"],
@@ -653,21 +725,28 @@ def pagina_custo_passagens(supabase):
         st.divider()
         st.caption(
             "Atalho pra abrir busca já preenchida no Skyscanner (link oficial "
-            "deles, sem API key — código do aeroporto, ex.: FOR, GRU, CGH):"
+            "deles, sem API key) — digita nome da cidade (ex.: Fortaleza) ou "
+            "já o código do aeroporto (ex.: FOR), os dois funcionam:"
         )
         c3, c4, c5 = st.columns(3)
-        origem_iata = c3.text_input("Origem (IATA)", key="sky_origem", max_chars=3).upper()
-        destino_iata = c4.text_input("Destino (IATA)", key="sky_destino", max_chars=3).upper()
+        origem_txt = c3.text_input("Origem", key="sky_origem")
+        destino_txt = c4.text_input("Destino", key="sky_destino")
         data_ida_sky = c5.date_input("Data de ida", value=date.today(), key="sky_data")
+        origem_iata = _resolver_iata(origem_txt)
+        destino_iata = _resolver_iata(destino_txt)
+        if origem_txt and not origem_iata:
+            st.caption(f"Não reconheci '{origem_txt}' — digita o código do aeroporto direto (ex.: FOR).")
+        if destino_txt and not destino_iata:
+            st.caption(f"Não reconheci '{destino_txt}' — digita o código do aeroporto direto (ex.: FOR).")
         if origem_iata and destino_iata:
             url_sky = (
                 "https://www.skyscanner.net/g/referrals/v1/flights/day-view/"
                 f"?origin={origem_iata}&destination={destino_iata}"
                 f"&outboundDate={data_ida_sky.isoformat()}&market=BR&currency=BRL&locale=pt-BR"
             )
-            st.link_button("🔗 Ver no Skyscanner", url_sky)
+            st.link_button(f"🔗 Ver no Skyscanner ({origem_iata} → {destino_iata})", url_sky)
         else:
-            st.caption("Preenche os 2 códigos IATA pra habilitar o link.")
+            st.caption("Preenche origem e destino (cidade ou código) pra habilitar o link.")
 
     aba_folga, aba_rapido = st.tabs(["Por folga", "Lançamento rápido"])
 
@@ -703,21 +782,28 @@ def pagina_custo_passagens(supabase):
 
             with st.form("form_add_trecho"):
                 st.write("Adicionar trecho (passagem/perna da viagem)")
-                c1, c2, c3 = st.columns(3)
+                st.caption("Só o essencial aqui — o resto é opcional, fica em 'Mais detalhes'.")
+                c1, c2 = st.columns(2)
                 sentido = c1.selectbox("Sentido", ["ida", "volta"])
                 modal = c2.selectbox("Modal", ["aviao", "onibus", "carro", "taxi", "outro"])
-                ordem = c3.number_input("Ordem (1ª perna=1, 2ª=2...)", min_value=1, value=1, step=1)
-                c4, c5 = st.columns(2)
-                origem_t = c4.text_input("Origem", key="trecho_origem")
-                destino_t = c5.text_input("Destino", key="trecho_destino")
-                c6, c7, c8 = st.columns(3)
-                preco_t = c6.number_input("Preço (R$)", min_value=0.0, step=0.01, format="%.2f")
-                data_t = c7.date_input("Data", value=date.today(), key="trecho_data")
-                duracao_t = c8.number_input("Duração (horas)", min_value=0.0, step=0.5, format="%.1f")
-                c9, c10 = st.columns(2)
-                km_t = c9.number_input("Km (opcional, útil pra carro)", min_value=0.0, step=1.0)
-                fornecedor_t = c10.text_input("Fornecedor/companhia", key="trecho_fornecedor")
-                obs_t = st.text_input("Observação (opcional)", key="trecho_obs")
+                c3, c4 = st.columns(2)
+                origem_t = c3.text_input("Origem", key="trecho_origem")
+                destino_t = c4.text_input("Destino", key="trecho_destino")
+                c5, c6 = st.columns(2)
+                preco_t = c5.number_input("Preço (R$)", min_value=0.0, step=0.01, format="%.2f")
+                data_t = c6.date_input("Data da viagem", value=date.today(), key="trecho_data")
+
+                with st.expander("Mais detalhes (opcional)"):
+                    c7, c8 = st.columns(2)
+                    fornecedor_t = c7.text_input("Fornecedor/companhia", key="trecho_fornecedor")
+                    duracao_t = c8.number_input("Duração (horas)", min_value=0.0, step=0.5, format="%.1f")
+                    c9, c10 = st.columns(2)
+                    km_t = c9.number_input("Km (útil pra carro)", min_value=0.0, step=1.0)
+                    data_compra_t = c10.date_input(
+                        "Data da compra (se diferente de hoje)", value=None, key="trecho_data_compra",
+                    )
+                    obs_t = st.text_input("Observação", key="trecho_obs")
+
                 enviar_trecho = st.form_submit_button("Adicionar trecho")
 
             if enviar_trecho:
@@ -725,10 +811,12 @@ def pagina_custo_passagens(supabase):
                     st.error("Preenche origem e destino.")
                 else:
                     viagem_id = None
+                    maior_ordem = 0
                     for v in (viagens_resp.data or []):
                         if v["sentido"] == sentido:
                             viagem_id = v["viagem_id"]
-                            break
+                            if v.get("ordem") and v["ordem"] > maior_ordem:
+                                maior_ordem = v["ordem"]
                     try:
                         if viagem_id is None:
                             nova_viagem = supabase.rpc("viajai_criar_viagem", {
@@ -737,7 +825,7 @@ def pagina_custo_passagens(supabase):
                             viagem_id = nova_viagem.data
                         supabase.rpc("viajai_adicionar_trecho", {
                             "p_viagem_id": viagem_id,
-                            "p_ordem": int(ordem),
+                            "p_ordem": maior_ordem + 1,
                             "p_origem": origem_t,
                             "p_destino": destino_t,
                             "p_modal": modal,
@@ -747,6 +835,7 @@ def pagina_custo_passagens(supabase):
                             "p_fornecedor": fornecedor_t or None,
                             "p_observacao": obs_t or None,
                             "p_duracao_horas": duracao_t or None,
+                            "p_data_compra": data_compra_t.isoformat() if data_compra_t else None,
                         }).execute()
                         st.success("Trecho adicionado.")
                         st.rerun()
@@ -845,6 +934,19 @@ def pagina_custo_passagens(supabase):
             _botao_exportar_excel(df_resumo, "viajai_resumo_custo_rota.xlsx")
         else:
             st.caption("Nenhum custo registrado ainda (nem lançamento rápido nem trecho com preço).")
+
+    st.divider()
+    st.write("**Gasto por período**")
+    st.caption("Soma tudo que tem data (trecho + gasto extra + lançamento rápido), mês a mês.")
+    meses_janela = st.slider("Últimos quantos meses?", min_value=1, max_value=24, value=12, key="periodo_meses")
+    periodo_resp = supabase.rpc("viajai_gasto_por_periodo", {"p_meses": meses_janela}).execute()
+    if periodo_resp.data:
+        df_periodo = pd.DataFrame(periodo_resp.data)
+        st.bar_chart(df_periodo.set_index("periodo")["valor_total"])
+        st.dataframe(df_periodo, hide_index=True, use_container_width=True)
+        _botao_exportar_excel(df_periodo, "viajai_gasto_por_periodo.xlsx")
+    else:
+        st.caption("Nenhum custo com data registrada ainda nesse período.")
 
 
 def main():
