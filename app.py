@@ -1,4 +1,4 @@
-# Viaj.AI — v0.8 (pendencia + urgencia manual editaveis de verdade, desvio de planejamento) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v0.9 (flag atrasado/atrasada + exportar Excel nas 3 telas) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -21,6 +21,7 @@
 # importar linha errada silenciosamente.
 
 import base64
+import io
 import os
 from datetime import date, datetime
 
@@ -73,6 +74,21 @@ ALIASES_COLUNA = {
     "termino da folga": "termino_folga",
     "término da folga": "termino_folga",
 }
+
+
+def _botao_exportar_excel(df, nome_arquivo, label="Exportar Excel"):
+    """Exporta o df atual (como esta na tela, ja filtrado/ordenado) pra .xlsx.
+    Pedido do Rafael (02/09): dar pra levar a tabela pra fora do app, ex.
+    compartilhar com gestor de obra que nao usa o Viaj.AI."""
+    buffer = io.BytesIO()
+    df.to_excel(buffer, index=False, engine="openpyxl")
+    st.download_button(
+        label,
+        data=buffer.getvalue(),
+        file_name=nome_arquivo,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"export_{nome_arquivo}",
+    )
 
 
 def get_client() -> Client:
@@ -305,6 +321,7 @@ def pagina_importar_re090(supabase):
             use_container_width=True,
             key="editor_pendencias",
         )
+        _botao_exportar_excel(df_pend.drop(columns=["resolvido"]), "viajai_pendencias.xlsx")
         if st.button("Salvar pendências resolvidas"):
             marcadas = editado_pend[editado_pend["resolvido"] == True]  # noqa: E712
             if marcadas.empty:
@@ -347,6 +364,16 @@ def pagina_confirmar_folgas(supabase):
         st.caption("Nenhuma folga 'prevista' aguardando confirmação no momento.")
     else:
         base = pd.DataFrame(previstas.data)
+        # "atrasada" = data de saida prevista ja passou e ninguem confirmou
+        # nada ainda (pedido do Rafael: risco real de colaborador seguir na
+        # obra alem do previsto sem registro). So' compara com hoje, nao
+        # precisa de RPC nova.
+        _hoje = date.today()
+        base["data_saida_prevista"] = pd.to_datetime(base["data_saida_prevista"]).dt.date
+        base["situacao"] = base["data_saida_prevista"].apply(
+            lambda d: "⚠️ atrasada" if pd.notna(d) and d < _hoje else "no prazo"
+        )
+        base = base.sort_values(by=["situacao", "data_saida_prevista"], ascending=[True, True])
         base["status_novo"] = "prevista"
         base["data_saida_real"] = pd.NaT
         base["data_retorno_real"] = pd.NaT
@@ -355,11 +382,12 @@ def pagina_confirmar_folgas(supabase):
         editado = st.data_editor(
             base,
             column_order=[
-                "nome", "obra_nome", "canteiro_nome",
+                "situacao", "nome", "obra_nome", "canteiro_nome",
                 "data_saida_prevista", "data_retorno_prevista",
                 "status_novo", "data_saida_real", "data_retorno_real", "motivo_venda",
             ],
             column_config={
+                "situacao": st.column_config.TextColumn("Situação", disabled=True),
                 "nome": st.column_config.TextColumn("Nome", disabled=True),
                 "obra_nome": st.column_config.TextColumn("Obra", disabled=True),
                 "canteiro_nome": st.column_config.TextColumn("Canteiro", disabled=True),
@@ -382,6 +410,10 @@ def pagina_confirmar_folgas(supabase):
             hide_index=True,
             use_container_width=True,
             key="editor_confirmar_folgas",
+        )
+        _botao_exportar_excel(
+            base.drop(columns=["status_novo", "data_saida_real", "data_retorno_real", "motivo_venda"]),
+            "viajai_confirmar_folgas.xlsx",
         )
 
         if st.button("Salvar alterações", type="primary"):
@@ -425,7 +457,7 @@ def pagina_confirmar_folgas(supabase):
         st.caption("Nenhuma mudança registrada ainda.")
 
 
-_ORDEM_URGENCIA = {"critico": 0, "atencao": 1, "normal": 2}
+_ORDEM_URGENCIA = {"atrasado": -1, "critico": 0, "atencao": 1, "normal": 2}
 
 
 def pagina_previsao(supabase):
@@ -456,9 +488,17 @@ def pagina_previsao(supabase):
             )
             return
 
-    # mais urgente primeiro: critico > atencao > normal > (sem classificacao)
+    # "atrasado" = dias_restantes negativo (a data prevista de saida ja
+    # passou e ninguem registrou nada ainda) - risco real, pedido do Rafael.
+    # So' compara com o que ja vem calculado, nao precisa de RPC nova.
+    df["situacao"] = df.apply(
+        lambda r: "atrasado" if pd.notna(r["dias_restantes"]) and r["dias_restantes"] < 0 else r["nivel_urgencia"],
+        axis=1,
+    )
+
+    # mais urgente primeiro: atrasado > critico > atencao > normal > (sem classificacao)
     # e, dentro do mesmo nivel, quem tem menos dias restantes primeiro
-    df["_ordem_urgencia"] = df["nivel_urgencia"].map(_ORDEM_URGENCIA).fillna(9)
+    df["_ordem_urgencia"] = df["situacao"].map(_ORDEM_URGENCIA).fillna(9)
     df = df.sort_values(by=["_ordem_urgencia", "dias_restantes"], na_position="last")
     df = df.drop(columns=["_ordem_urgencia"])
 
@@ -473,7 +513,7 @@ def pagina_previsao(supabase):
     )
 
     colunas_principais = [
-        "nome", "nivel_urgencia", "dias_restantes",
+        "nome", "situacao", "dias_restantes",
         "data_saida_prevista", "data_retorno_prevista",
         "obra_nome", "canteiro_nome", "override_manual",
     ]
@@ -482,7 +522,7 @@ def pagina_previsao(supabase):
     # fora da visualizacao, mas continuam no df (usadas ao salvar).
     colunas_ocultas = {
         "obra_id", "canteiro_id", "data_base_retorno",
-        "tem_historico", "urgencia_manual",
+        "tem_historico", "urgencia_manual", "nivel_urgencia",
     }
     outras = [c for c in df.columns if c not in colunas_principais and c not in colunas_ocultas]
     df = df[colunas_principais + outras]
@@ -508,6 +548,7 @@ def pagina_previsao(supabase):
         use_container_width=True,
         key="editor_previsao",
     )
+    _botao_exportar_excel(df.drop(columns=["override_manual"]), "viajai_previsao_folgas.xlsx")
 
     if st.button("Salvar overrides de urgência"):
         mudou = editado[editado["override_manual"] != df["override_manual"]]
@@ -544,7 +585,9 @@ def pagina_previsao(supabase):
     )
     desvio = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 200}).execute()
     if desvio.data:
-        st.dataframe(pd.DataFrame(desvio.data), use_container_width=True, hide_index=True)
+        df_desvio = pd.DataFrame(desvio.data)
+        st.dataframe(df_desvio, use_container_width=True, hide_index=True)
+        _botao_exportar_excel(df_desvio, "viajai_desvio_planejamento.xlsx")
     else:
         st.caption("Nenhuma folga confirmada/realizada ainda pra comparar.")
 
