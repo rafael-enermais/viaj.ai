@@ -1,4 +1,4 @@
-# Viaj.AI — v1.1 (previsao de gasto por colaborador + KPI 30d + gasto por periodo + UX simplificada) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v1.2 (Assistente/chat com tool-use Anthropic, so consulta, historico persistido) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
