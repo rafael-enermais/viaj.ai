@@ -1,4 +1,4 @@
-# Viaj.AI — v0.10 (urgencia visivel tb em Confirmar folgas) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v1.0 (Custo & Passagens: registro por folga + lancamento rapido + comparativos) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -609,6 +609,244 @@ def pagina_previsao(supabase):
         st.caption("Nenhuma folga confirmada/realizada ainda pra comparar.")
 
 
+
+def pagina_custo_passagens(supabase):
+    st.subheader("Custo & Passagens")
+    st.caption(
+        "Registra o preço REAL pago (passagem/ônibus/carro) e gastos extras "
+        "por folga, ou um lançamento rápido solto quando não dá pra apontar "
+        "folga específica na hora. Sem busca de preço ao vivo (decisão "
+        "02/09 — ver 00-handoff): a inteligência aqui é o histórico que a "
+        "própria Amanda for alimentando, cresce com o uso."
+    )
+
+    with st.expander("🔎 Consultar histórico da rota (antes de comprar)"):
+        st.caption(
+            "Usa o que já foi registrado no Viaj.AI — escreva origem/destino "
+            "igual a como costuma registrar (mesmo texto), senão não casa."
+        )
+        c1, c2 = st.columns(2)
+        origem_c = c1.text_input("Origem", key="consulta_origem")
+        destino_c = c2.text_input("Destino", key="consulta_destino")
+        if st.button("Consultar histórico", key="btn_consulta_hist"):
+            if origem_c and destino_c:
+                sug = supabase.rpc("viajai_sugestao_fornecedor_rota", {
+                    "p_origem": origem_c, "p_destino": destino_c,
+                }).execute()
+                if sug.data:
+                    st.write("**Fornecedor mais usado nessa rota:**")
+                    st.dataframe(sug.data, hide_index=True, use_container_width=True)
+                else:
+                    st.caption("Sem fornecedor registrado ainda pra essa rota.")
+
+                comp_modal = supabase.rpc("viajai_comparar_modais_rota", {
+                    "p_origem": origem_c, "p_destino": destino_c,
+                }).execute()
+                if comp_modal.data:
+                    st.write("**Comparativo por modal (preço médio e duração média):**")
+                    st.dataframe(comp_modal.data, hide_index=True, use_container_width=True)
+                else:
+                    st.caption("Sem dado suficiente ainda pra comparar modal nessa rota.")
+            else:
+                st.info("Preenche origem e destino.")
+
+        st.divider()
+        st.caption(
+            "Atalho pra abrir busca já preenchida no Skyscanner (link oficial "
+            "deles, sem API key — código do aeroporto, ex.: FOR, GRU, CGH):"
+        )
+        c3, c4, c5 = st.columns(3)
+        origem_iata = c3.text_input("Origem (IATA)", key="sky_origem", max_chars=3).upper()
+        destino_iata = c4.text_input("Destino (IATA)", key="sky_destino", max_chars=3).upper()
+        data_ida_sky = c5.date_input("Data de ida", value=date.today(), key="sky_data")
+        if origem_iata and destino_iata:
+            url_sky = (
+                "https://www.skyscanner.net/g/referrals/v1/flights/day-view/"
+                f"?origin={origem_iata}&destination={destino_iata}"
+                f"&outboundDate={data_ida_sky.isoformat()}&market=BR&currency=BRL&locale=pt-BR"
+            )
+            st.link_button("🔗 Ver no Skyscanner", url_sky)
+        else:
+            st.caption("Preenche os 2 códigos IATA pra habilitar o link.")
+
+    aba_folga, aba_rapido = st.tabs(["Por folga", "Lançamento rápido"])
+
+    with aba_folga:
+        folgas_resp = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 500}).execute()
+        if not folgas_resp.data:
+            st.caption(
+                "Nenhuma folga confirmada/realizada ainda — confirme pelo "
+                "menos 1 na tela 'Confirmar folgas' antes de registrar custo."
+            )
+        else:
+            df_folgas = pd.DataFrame(folgas_resp.data)
+            df_folgas["rotulo"] = df_folgas.apply(
+                lambda r: f"#{r['folga_id']} — {r['nome']} — {r.get('canteiro_nome') or '—'} — {r['status']}",
+                axis=1,
+            )
+            escolha = st.selectbox("Folga", df_folgas["rotulo"], key="folga_custo_select")
+            folga_id_sel = int(df_folgas.loc[df_folgas["rotulo"] == escolha, "folga_id"].iloc[0])
+
+            viagens_resp = supabase.rpc("viajai_listar_viagens_folga", {"p_folga_id": folga_id_sel}).execute()
+            st.write("**Trechos já registrados:**")
+            if viagens_resp.data:
+                st.dataframe(pd.DataFrame(viagens_resp.data), hide_index=True, use_container_width=True)
+            else:
+                st.caption("Nenhum trecho registrado ainda pra essa folga.")
+
+            gastos_resp = supabase.rpc("viajai_listar_gastos_folga", {"p_folga_id": folga_id_sel}).execute()
+            st.write("**Gastos extras já registrados:**")
+            if gastos_resp.data:
+                st.dataframe(pd.DataFrame(gastos_resp.data), hide_index=True, use_container_width=True)
+            else:
+                st.caption("Nenhum gasto extra registrado ainda.")
+
+            with st.form("form_add_trecho"):
+                st.write("Adicionar trecho (passagem/perna da viagem)")
+                c1, c2, c3 = st.columns(3)
+                sentido = c1.selectbox("Sentido", ["ida", "volta"])
+                modal = c2.selectbox("Modal", ["aviao", "onibus", "carro", "taxi", "outro"])
+                ordem = c3.number_input("Ordem (1ª perna=1, 2ª=2...)", min_value=1, value=1, step=1)
+                c4, c5 = st.columns(2)
+                origem_t = c4.text_input("Origem", key="trecho_origem")
+                destino_t = c5.text_input("Destino", key="trecho_destino")
+                c6, c7, c8 = st.columns(3)
+                preco_t = c6.number_input("Preço (R$)", min_value=0.0, step=0.01, format="%.2f")
+                data_t = c7.date_input("Data", value=date.today(), key="trecho_data")
+                duracao_t = c8.number_input("Duração (horas)", min_value=0.0, step=0.5, format="%.1f")
+                c9, c10 = st.columns(2)
+                km_t = c9.number_input("Km (opcional, útil pra carro)", min_value=0.0, step=1.0)
+                fornecedor_t = c10.text_input("Fornecedor/companhia", key="trecho_fornecedor")
+                obs_t = st.text_input("Observação (opcional)", key="trecho_obs")
+                enviar_trecho = st.form_submit_button("Adicionar trecho")
+
+            if enviar_trecho:
+                if not origem_t or not destino_t:
+                    st.error("Preenche origem e destino.")
+                else:
+                    viagem_id = None
+                    for v in (viagens_resp.data or []):
+                        if v["sentido"] == sentido:
+                            viagem_id = v["viagem_id"]
+                            break
+                    try:
+                        if viagem_id is None:
+                            nova_viagem = supabase.rpc("viajai_criar_viagem", {
+                                "p_folga_id": folga_id_sel, "p_sentido": sentido,
+                            }).execute()
+                            viagem_id = nova_viagem.data
+                        supabase.rpc("viajai_adicionar_trecho", {
+                            "p_viagem_id": viagem_id,
+                            "p_ordem": int(ordem),
+                            "p_origem": origem_t,
+                            "p_destino": destino_t,
+                            "p_modal": modal,
+                            "p_km": km_t or None,
+                            "p_data": data_t.isoformat() if data_t else None,
+                            "p_preco": preco_t or None,
+                            "p_fornecedor": fornecedor_t or None,
+                            "p_observacao": obs_t or None,
+                            "p_duracao_horas": duracao_t or None,
+                        }).execute()
+                        st.success("Trecho adicionado.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao adicionar trecho: {e}")
+
+            with st.form("form_add_gasto"):
+                st.write("Adicionar gasto extra (hospedagem, alimentação, transporte local...)")
+                c1, c2 = st.columns(2)
+                tipo_g = c1.selectbox("Tipo", ["hospedagem", "transporte_local", "alimentacao", "outro"])
+                valor_g = c2.number_input("Valor (R$)", min_value=0.0, step=0.01, format="%.2f", key="gasto_valor")
+                data_g = st.date_input("Data", value=date.today(), key="gasto_data")
+                obs_g = st.text_input("Observação (opcional)", key="gasto_obs")
+                enviar_gasto = st.form_submit_button("Adicionar gasto")
+
+            if enviar_gasto:
+                if not valor_g:
+                    st.error("Preenche o valor.")
+                else:
+                    try:
+                        supabase.rpc("viajai_registrar_gasto", {
+                            "p_folga_id": folga_id_sel,
+                            "p_tipo": tipo_g,
+                            "p_valor": valor_g,
+                            "p_data": data_g.isoformat() if data_g else None,
+                            "p_observacao": obs_g or None,
+                        }).execute()
+                        st.success("Gasto registrado.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao registrar gasto: {e}")
+
+        st.divider()
+        st.write("**Comparativo de custo x desvio de planejamento**")
+        comp = supabase.rpc("viajai_comparativo_custo_folga", {"p_limite": 200}).execute()
+        if comp.data:
+            df_comp = pd.DataFrame(comp.data)
+            st.dataframe(df_comp, hide_index=True, use_container_width=True)
+            _botao_exportar_excel(df_comp, "viajai_comparativo_custo.xlsx")
+        else:
+            st.caption("Nenhum custo registrado ainda pra comparar com o desvio de planejamento.")
+
+    with aba_rapido:
+        st.caption(
+            "Pra quando não dá pra apontar folga específica na hora "
+            "(ex.: \"comprei 10 passagens do Ceará pra SP\") — serve pra "
+            "somar gasto por rota/período e ajudar a prever."
+        )
+        with st.form("form_lancamento_rapido"):
+            c1, c2 = st.columns(2)
+            origem_lr = c1.text_input("Origem", key="lr_origem")
+            destino_lr = c2.text_input("Destino", key="lr_destino")
+            c3, c4, c5 = st.columns(3)
+            modal_lr = c3.selectbox("Modal", ["aviao", "onibus", "carro", "taxi", "outro"], key="lr_modal")
+            qtd_lr = c4.number_input("Quantidade de passagens", min_value=1, value=1, step=1, key="lr_qtd")
+            valor_lr = c5.number_input("Valor total (R$)", min_value=0.0, step=0.01, format="%.2f", key="lr_valor")
+            data_lr = st.date_input("Data da compra", value=date.today(), key="lr_data")
+            obs_lr = st.text_input("Observação (opcional)", key="lr_obs")
+            enviar_lr = st.form_submit_button("Registrar")
+
+        if enviar_lr:
+            if not origem_lr or not destino_lr or not valor_lr:
+                st.error("Preenche origem, destino e valor.")
+            else:
+                try:
+                    supabase.rpc("viajai_registrar_lancamento_rapido", {
+                        "p_origem": origem_lr,
+                        "p_destino": destino_lr,
+                        "p_valor_total": valor_lr,
+                        "p_quantidade": int(qtd_lr),
+                        "p_modal": modal_lr,
+                        "p_data": data_lr.isoformat() if data_lr else None,
+                        "p_observacao": obs_lr or None,
+                    }).execute()
+                    st.success("Lançamento registrado.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao registrar lançamento: {e}")
+
+        st.divider()
+        st.write("**Lançamentos recentes**")
+        lancs = supabase.rpc("viajai_listar_lancamentos_rapidos", {"p_limite": 200}).execute()
+        if lancs.data:
+            df_lanc = pd.DataFrame(lancs.data)
+            st.dataframe(df_lanc, hide_index=True, use_container_width=True)
+            _botao_exportar_excel(df_lanc, "viajai_lancamentos_rapidos.xlsx")
+        else:
+            st.caption("Nenhum lançamento rápido ainda.")
+
+        st.divider()
+        st.write("**Resumo de custo por rota**")
+        resumo = supabase.rpc("viajai_resumo_custo_por_rota", {"p_limite": 100}).execute()
+        if resumo.data:
+            df_resumo = pd.DataFrame(resumo.data)
+            st.dataframe(df_resumo, hide_index=True, use_container_width=True)
+            _botao_exportar_excel(df_resumo, "viajai_resumo_custo_rota.xlsx")
+        else:
+            st.caption("Nenhum custo registrado ainda (nem lançamento rápido nem trecho com preço).")
+
+
 def main():
     if "sessao" not in st.session_state:
         tela_login()
@@ -625,7 +863,7 @@ def main():
         st.write(f"Logado como: {st.session_state.usuario}")
         pagina = st.radio(
             "Navegação",
-            ["Importar RE090", "Confirmar folgas", "Previsão de folgas"],
+            ["Importar RE090", "Confirmar folgas", "Previsão de folgas", "Custo & Passagens"],
         )
         if st.button("Sair"):
             supabase.auth.sign_out()
@@ -638,6 +876,8 @@ def main():
         pagina_confirmar_folgas(supabase)
     elif pagina == "Previsão de folgas":
         pagina_previsao(supabase)
+    elif pagina == "Custo & Passagens":
+        pagina_custo_passagens(supabase)
 
 
 if __name__ == "__main__":
