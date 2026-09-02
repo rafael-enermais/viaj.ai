@@ -1,4 +1,4 @@
-# Viaj.AI — v0.9 (flag atrasado/atrasada + exportar Excel nas 3 telas) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v0.10 (urgencia visivel tb em Confirmar folgas) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -373,6 +373,18 @@ def pagina_confirmar_folgas(supabase):
         base["situacao"] = base["data_saida_prevista"].apply(
             lambda d: "⚠️ atrasada" if pd.notna(d) and d < _hoje else "no prazo"
         )
+
+        # urgencia (mesmo calculo da tela Previsao de folgas) trazida por
+        # colaborador_id - pedido do Rafael: ajuda a Amanda a priorizar
+        # quem confirmar primeiro sem precisar trocar de tela.
+        prev_resp = supabase.rpc("viajai_previsao_folgas").execute()
+        if prev_resp.data:
+            df_urg = pd.DataFrame(prev_resp.data)[["colaborador_id", "nivel_urgencia"]]
+            df_urg = df_urg.rename(columns={"nivel_urgencia": "urgencia"})
+            base = base.merge(df_urg, on="colaborador_id", how="left")
+        else:
+            base["urgencia"] = None
+        base["urgencia"] = base["urgencia"].fillna("—")
         base = base.sort_values(by=["situacao", "data_saida_prevista"], ascending=[True, True])
         base["status_novo"] = "prevista"
         base["data_saida_real"] = pd.NaT
@@ -382,12 +394,16 @@ def pagina_confirmar_folgas(supabase):
         editado = st.data_editor(
             base,
             column_order=[
-                "situacao", "nome", "obra_nome", "canteiro_nome",
+                "situacao", "urgencia", "nome", "obra_nome", "canteiro_nome",
                 "data_saida_prevista", "data_retorno_prevista",
                 "status_novo", "data_saida_real", "data_retorno_real", "motivo_venda",
             ],
             column_config={
                 "situacao": st.column_config.TextColumn("Situação", disabled=True),
+                "urgencia": st.column_config.TextColumn(
+                    "Urgência", disabled=True,
+                    help="Mesmo cálculo da tela Previsão de folgas — pra editar o override, vai lá.",
+                ),
                 "nome": st.column_config.TextColumn("Nome", disabled=True),
                 "obra_nome": st.column_config.TextColumn("Obra", disabled=True),
                 "canteiro_nome": st.column_config.TextColumn("Canteiro", disabled=True),
@@ -415,6 +431,7 @@ def pagina_confirmar_folgas(supabase):
             base.drop(columns=["status_novo", "data_saida_real", "data_retorno_real", "motivo_venda"]),
             "viajai_confirmar_folgas.xlsx",
         )
+        st.caption("'Urgência' é só leitura aqui — pra travar manual (override), usa a tela 'Previsão de folgas'.")
 
         if st.button("Salvar alterações", type="primary"):
             mudou = editado[editado["status_novo"] != "prevista"]
