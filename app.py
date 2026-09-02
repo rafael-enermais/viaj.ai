@@ -1,4 +1,4 @@
-# Viaj.AI — v0.7.1 (tira falsos checkboxes de Previsao/Pendencias, sem RPC de escrita por tras) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v0.8 (pendencia + urgencia manual editaveis de verdade, desvio de planejamento) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -284,18 +284,46 @@ def pagina_importar_re090(supabase):
 
     st.divider()
     st.subheader("Pendências abertas")
+    st.caption(
+        "Marca 'Resolvida' pra tirar da lista (revisou manualmente e não "
+        "precisa mais aparecer aqui — não cria folga nenhuma, só limpa a fila)."
+    )
     pend = supabase.rpc("viajai_listar_pendencias_import", {"p_apenas_nao_resolvidas": True}).execute()
     if pend.data:
-        st.caption(
-            "Só leitura por enquanto — marcar pendência como resolvida ainda "
-            "não tem tela (fica pra depois, ver 00-handoff)."
-        )
         df_pend = pd.DataFrame(pend.data)
-        # tira "resolvido" (sempre False aqui, a RPC ja filtra nao-resolvidas
-        # -- so confundia como um checkbox clicavel que na pratica nao fazia
-        # nada, st.dataframe nunca aceita edicao) e "origem" (sempre 're090').
-        df_pend = df_pend.drop(columns=[c for c in ["resolvido", "origem"] if c in df_pend.columns])
-        st.dataframe(df_pend, use_container_width=True, hide_index=True)
+        df_pend = df_pend.drop(columns=[c for c in ["origem"] if c in df_pend.columns])
+        df_pend["resolvido"] = False
+        editado_pend = st.data_editor(
+            df_pend,
+            column_config={
+                "resolvido": st.column_config.CheckboxColumn(
+                    "Resolvida", help="Marca e clica em Salvar embaixo pra tirar da lista."
+                ),
+            },
+            disabled=[c for c in df_pend.columns if c not in ("resolvido",)],
+            hide_index=True,
+            use_container_width=True,
+            key="editor_pendencias",
+        )
+        if st.button("Salvar pendências resolvidas"):
+            marcadas = editado_pend[editado_pend["resolvido"] == True]  # noqa: E712
+            if marcadas.empty:
+                st.info("Nenhuma pendência marcada — nada pra salvar.")
+            else:
+                erros = 0
+                for _, linha in marcadas.iterrows():
+                    try:
+                        supabase.rpc("viajai_marcar_pendencia_resolvida", {
+                            "p_pendencia_id": int(linha["id"]),
+                            "p_resolvido": True,
+                        }).execute()
+                    except Exception as e:
+                        erros += 1
+                        st.error(f"Erro ao resolver pendência {linha['id']}: {e}")
+                sucesso = len(marcadas) - erros
+                if sucesso:
+                    st.success(f"{sucesso} pendência(s) marcada(s) como resolvida(s).")
+                st.rerun()
     else:
         st.caption("Nenhuma pendência em aberto.")
 
@@ -434,23 +462,91 @@ def pagina_previsao(supabase):
     df = df.sort_values(by=["_ordem_urgencia", "dias_restantes"], na_position="last")
     df = df.drop(columns=["_ordem_urgencia"])
 
+    # override manual de urgencia: nivel_urgencia ja vem calculado com o
+    # override aplicado (COALESCE no RPC) e urgencia_manual diz se existe
+    # override pra aquela pessoa - entao da pra reconstruir o valor bruto
+    # do override sem precisar de outra RPC.
+    _UO_AUTOMATICO = "(automático)"
+    df["override_manual"] = df.apply(
+        lambda r: r["nivel_urgencia"] if r.get("urgencia_manual") else _UO_AUTOMATICO,
+        axis=1,
+    )
+
     colunas_principais = [
         "nome", "nivel_urgencia", "dias_restantes",
         "data_saida_prevista", "data_retorno_prevista",
-        "obra_nome", "canteiro_nome",
+        "obra_nome", "canteiro_nome", "override_manual",
     ]
     colunas_principais = [c for c in colunas_principais if c in df.columns]
-    # colunas tecnicas (ids, flags internas de ordenacao/filtro) e
-    # "urgencia_manual" (falso checkbox - RPC de escrita ja existe mas
-    # nenhuma tela chama ainda, ver 00-handoff) ficam de fora da tabela.
+    # colunas tecnicas (ids, flags internas de ordenacao/filtro) ficam de
+    # fora da visualizacao, mas continuam no df (usadas ao salvar).
     colunas_ocultas = {
-        "colaborador_id", "obra_id", "canteiro_id",
-        "data_base_retorno", "tem_historico", "urgencia_manual",
+        "obra_id", "canteiro_id", "data_base_retorno",
+        "tem_historico", "urgencia_manual",
     }
     outras = [c for c in df.columns if c not in colunas_principais and c not in colunas_ocultas]
     df = df[colunas_principais + outras]
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption(
+        "'Urgência' (coluna calculada) muda sozinha conforme os dias passam. "
+        "Pra travar manualmente pra 1 pessoa (ex.: sabe que ela vai atrasar "
+        "por outro motivo), muda 'Override manual' e clica Salvar embaixo — "
+        "'(automático)' volta a deixar o cálculo decidir sozinho."
+    )
+    editado = st.data_editor(
+        df,
+        column_config={
+            "override_manual": st.column_config.SelectboxColumn(
+                "Override manual",
+                options=[_UO_AUTOMATICO, "critico", "atencao", "normal"],
+                required=True,
+            ),
+        },
+        disabled=[c for c in df.columns if c != "override_manual"],
+        column_order=colunas_principais,
+        hide_index=True,
+        use_container_width=True,
+        key="editor_previsao",
+    )
+
+    if st.button("Salvar overrides de urgência"):
+        mudou = editado[editado["override_manual"] != df["override_manual"]]
+        if mudou.empty:
+            st.info("Nenhum override mudou — nada pra salvar.")
+        else:
+            erros = 0
+            for _, linha in mudou.iterrows():
+                try:
+                    if linha["override_manual"] == _UO_AUTOMATICO:
+                        supabase.rpc("viajai_remover_urgencia_override", {
+                            "p_colaborador_id": linha["colaborador_id"],
+                        }).execute()
+                    else:
+                        supabase.rpc("viajai_definir_urgencia_override", {
+                            "p_colaborador_id": linha["colaborador_id"],
+                            "p_nivel": linha["override_manual"],
+                        }).execute()
+                except Exception as e:
+                    erros += 1
+                    st.error(f"Erro ao salvar override de {linha['nome']}: {e}")
+            sucesso = len(mudou) - erros
+            if sucesso:
+                st.success(f"{sucesso} override(s) salvo(s).")
+            st.rerun()
+
+    st.divider()
+    st.subheader("Desvio de planejamento")
+    st.caption(
+        "Prevista x real: só datas por enquanto (custo em R$ ainda não tem "
+        "tela pra registrar — viagem/trecho/gasto é o próximo bloco grande, "
+        "ver 00-handoff). Positivo = atrasou em relação ao previsto; "
+        "negativo = antecipou."
+    )
+    desvio = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 200}).execute()
+    if desvio.data:
+        st.dataframe(pd.DataFrame(desvio.data), use_container_width=True, hide_index=True)
+    else:
+        st.caption("Nenhuma folga confirmada/realizada ainda pra comparar.")
 
 
 def main():
