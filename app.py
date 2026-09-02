@@ -1,4 +1,4 @@
-# Viaj.AI — v0.5 (dedup no import + previsao ordenada por urgencia) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v0.6 (fecha o ciclo: tela Confirmar folgas) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -291,6 +291,77 @@ def pagina_importar_re090(supabase):
         st.caption("Nenhuma pendência em aberto.")
 
 
+_STATUS_LABELS = {
+    "confirmada": "Confirmada (vai viajar mesmo, datas batem)",
+    "em_andamento": "Em andamento (já saiu, ainda não voltou)",
+    "realizada": "Realizada (já voltou)",
+    "vendida": "Vendida (não sai — converteu em pagamento, continua trabalhando)",
+    "cancelada": "Cancelada (não vai acontecer)",
+}
+
+
+def pagina_confirmar_folgas(supabase):
+    st.subheader("Confirmar folgas")
+    st.caption(
+        "Fecha o ciclo: aqui você registra o que realmente aconteceu com "
+        "cada folga que caiu como 'prevista' (via import ou manual). Sem "
+        "isso, a Previsão de folgas nunca reflete a realidade — só o que "
+        "foi planejado."
+    )
+
+    previstas = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 200}).execute()
+    if not previstas.data:
+        st.caption("Nenhuma folga 'prevista' aguardando confirmação no momento.")
+        return
+
+    opcoes = {
+        f"{p['nome']} — saída prevista {p['data_saida_prevista'] or '?'} "
+        f"({p['obra_nome'] or p['canteiro_nome'] or 'obra ?'})": p
+        for p in previstas.data
+    }
+    escolha = st.selectbox("Selecione a folga a confirmar", list(opcoes.keys()))
+    p = opcoes[escolha]
+
+    with st.form("confirmar_folga"):
+        status_label = st.radio("O que aconteceu de verdade?", list(_STATUS_LABELS.values()))
+        status = next(k for k, v in _STATUS_LABELS.items() if v == status_label)
+
+        data_saida_real = None
+        data_retorno_real = None
+        motivo_venda = None
+
+        if status in ("em_andamento", "realizada"):
+            data_saida_real = st.date_input(
+                "Data de saída real", value=p["data_saida_prevista"] or date.today()
+            )
+        if status == "realizada":
+            data_retorno_real = st.date_input(
+                "Data de retorno real", value=p["data_retorno_prevista"] or date.today()
+            )
+        if status == "vendida":
+            motivo_venda = st.text_input("Motivo/observação da venda (opcional)")
+
+        enviar = st.form_submit_button("Confirmar", type="primary")
+
+    if enviar:
+        try:
+            supabase.rpc("viajai_atualizar_folga", {
+                "p_folga_id": p["folga_id"],
+                "p_status": status,
+                "p_data_saida_real": data_saida_real.isoformat() if data_saida_real else None,
+                "p_data_retorno_real": data_retorno_real.isoformat() if data_retorno_real else None,
+                "p_motivo_venda": motivo_venda,
+            }).execute()
+            st.success(f"Folga de {p['nome']} atualizada pra '{status}'.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erro ao confirmar: {e}")
+
+    st.divider()
+    st.caption(f"{len(previstas.data)} folga(s) prevista(s) aguardando confirmação.")
+    st.dataframe(previstas.data, use_container_width=True, hide_index=True)
+
+
 _ORDEM_URGENCIA = {"critico": 0, "atencao": 1, "normal": 2}
 
 
@@ -354,7 +425,10 @@ def main():
     with st.sidebar:
         render_logo(height=56)
         st.write(f"Logado como: {st.session_state.usuario}")
-        pagina = st.radio("Navegação", ["Importar RE090", "Previsão de folgas"])
+        pagina = st.radio(
+            "Navegação",
+            ["Importar RE090", "Confirmar folgas", "Previsão de folgas"],
+        )
         if st.button("Sair"):
             supabase.auth.sign_out()
             del st.session_state.sessao
@@ -362,6 +436,8 @@ def main():
 
     if pagina == "Importar RE090":
         pagina_importar_re090(supabase)
+    elif pagina == "Confirmar folgas":
+        pagina_confirmar_folgas(supabase)
     elif pagina == "Previsão de folgas":
         pagina_previsao(supabase)
 
