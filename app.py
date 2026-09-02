@@ -20,6 +20,7 @@
 # diferente o suficiente pra nao casar "nome", a tela avisa em vez de
 # importar linha errada silenciosamente.
 
+import base64
 import os
 from datetime import date, datetime
 
@@ -34,6 +35,28 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
 st.set_page_config(page_title="Viaj.AI", page_icon="🧳", layout="wide")
+
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo-enermais.png")
+
+
+@st.cache_data
+def logo_base64():
+    with open(LOGO_PATH, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+def render_logo(height=56):
+    # Mesmo padrão do TIA.go/Radar/RHDADOS: logo oficial (navy+laranja) em
+    # silhueta via filtro CSS, em vez de arquivo separado. TIA.go usa fundo
+    # escuro -> brightness(0) invert(1) (silhueta branca). Viaj.AI tem fundo
+    # claro -> só brightness(0), sem invert (silhueta preta).
+    st.markdown(
+        f"""
+        <img src="data:image/png;base64,{logo_base64()}" height="{height}"
+             style="filter: brightness(0); margin-bottom: 12px;">
+        """,
+        unsafe_allow_html=True,
+    )
 
 ABA_FOLGAS = "Controle de Folgas"
 LINHA_CABECALHO = 4  # confirmado em 4/4 arquivos RE090 reais analisados
@@ -58,8 +81,8 @@ def get_client() -> Client:
 
 
 def tela_login():
-    st.title("🧳 Viaj.AI")
-    st.caption("Gestão de folgas, deslocamento e custo — EnerMais")
+    render_logo(height=64)
+    st.caption("Viaj.AI — Gestão de folgas, deslocamento e custo")
     with st.form("login"):
         email = st.text_input("E-mail")
         senha = st.text_input("Senha", type="password")
@@ -226,7 +249,8 @@ def main():
         del st.session_state.sessao
         st.rerun()
 
-    st.title("🧳 Viaj.AI")
+    render_logo(height=48)
+    st.caption("Viaj.AI")
 
     if pagina == "Importar RE090":
         pagina_importar_re090(supabase)
