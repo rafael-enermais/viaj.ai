@@ -1,4 +1,4 @@
-# Viaj.AI — v0.4 (tema escuro + logo sidebar + import multi-arquivo + lote/reversao) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v0.5 (dedup no import + previsao ordenada por urgencia) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -25,6 +25,7 @@ import os
 from datetime import date, datetime
 
 import openpyxl
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -241,7 +242,11 @@ def pagina_importar_re090(supabase):
         for nome_arquivo, resultados in st.session_state["resultado_import"].items():
             criadas = sum(1 for r in resultados if r.get("resultado") == "criada")
             pendentes = sum(1 for r in resultados if r.get("resultado") == "pendencia")
-            st.success(f"**{nome_arquivo}**: {criadas} folga(s) criada(s), {pendentes} em pendência.")
+            duplicadas = sum(1 for r in resultados if r.get("resultado") == "duplicada")
+            msg = f"**{nome_arquivo}**: {criadas} folga(s) criada(s), {pendentes} em pendência"
+            if duplicadas:
+                msg += f", {duplicadas} duplicada(s) (já existia folga prevista pra essa pessoa nessa mesma data — ignorada, não criou de novo)"
+            st.success(msg + ".")
             st.dataframe(resultados)
 
     st.divider()
@@ -286,6 +291,9 @@ def pagina_importar_re090(supabase):
         st.caption("Nenhuma pendência em aberto.")
 
 
+_ORDEM_URGENCIA = {"critico": 0, "atencao": 1, "normal": 2}
+
+
 def pagina_previsao(supabase):
     st.subheader("Previsão de folgas")
     st.caption(
@@ -297,7 +305,39 @@ def pagina_previsao(supabase):
     if not resp.data:
         st.caption("Sem dados ainda.")
         return
-    st.dataframe(resp.data, use_container_width=True)
+
+    df = pd.DataFrame(resp.data)
+
+    mostrar_sem_historico = st.checkbox(
+        "Mostrar também quem ainda não tem nenhuma folga registrada "
+        "(sem previsão calculável ainda)",
+        value=False,
+    )
+    if not mostrar_sem_historico:
+        df = df[df["tem_historico"] == True]  # noqa: E712
+        if df.empty:
+            st.caption(
+                "Ninguém com histórico ainda — importe pelo menos 1 RE090 ou "
+                "marque a caixa acima pra ver a lista completa sem previsão."
+            )
+            return
+
+    # mais urgente primeiro: critico > atencao > normal > (sem classificacao)
+    # e, dentro do mesmo nivel, quem tem menos dias restantes primeiro
+    df["_ordem_urgencia"] = df["nivel_urgencia"].map(_ORDEM_URGENCIA).fillna(9)
+    df = df.sort_values(by=["_ordem_urgencia", "dias_restantes"], na_position="last")
+    df = df.drop(columns=["_ordem_urgencia"])
+
+    colunas_principais = [
+        "nome", "nivel_urgencia", "dias_restantes",
+        "data_saida_prevista", "data_retorno_prevista",
+        "obra_nome", "canteiro_nome",
+    ]
+    colunas_principais = [c for c in colunas_principais if c in df.columns]
+    outras = [c for c in df.columns if c not in colunas_principais]
+    df = df[colunas_principais + outras]
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 def main():

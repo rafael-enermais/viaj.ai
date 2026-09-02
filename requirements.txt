@@ -3,3 +3,4 @@ supabase==2.31.0
 anthropic
 python-dotenv
 openpyxl==3.1.5
+pandas
