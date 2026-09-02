@@ -25,6 +25,7 @@ import io
 import os
 from datetime import date, datetime
 
+import anthropic
 import openpyxl
 import pandas as pd
 import streamlit as st
@@ -35,6 +36,13 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+# TODO (03/09): confirmado contra a doc oficial da Anthropic em 02/09/2026
+# que "claude-sonnet-5" e' o identificador de modelo atual - MAS confirma
+# de novo aqui se isso mudar (mesmo erro que o TIA.go deixou marcado: nunca
+# hardcoded sem checar contra a conta/doc na hora).
+MODEL_ID = "claude-sonnet-5"
 
 st.set_page_config(page_title="Viaj.AI", page_icon="🧳", layout="wide")
 
@@ -949,6 +957,276 @@ def pagina_custo_passagens(supabase):
         st.caption("Nenhum custo com data registrada ainda nesse período.")
 
 
+
+# ---------- Assistente (chat) — mesmo padrao validado do TIA.go/app_tiago.py ----------
+# (lido direto do arquivo real antes de desenhar isso, nao suposicao):
+# loop de tool-use da Anthropic, 2 fases (grava pergunta + rerun, so' entao
+# chama a API) pra evitar bug de ordem de mensagem, dolar escapado no
+# markdown. DIFERENCA proposital do TIA.go: aqui o historico e' PERSISTIDO
+# por usuario (schema_v0.11), o TIA.go so' guarda em session_state (some ao
+# dar F5) - pedido explicito do Rafael (02/09): "gostaria que a memoria do
+# chat fosse preservada pra ajudar nas decisoes".
+#
+# ESCOPO v1 (decisao 02/09, ver 00-handoff): SO CONSULTA. Nenhuma ferramenta
+# de escrita ainda - registrar lancamento/trecho por chat fica pra depois,
+# so' depois de validar que a parte de leitura funciona bem de verdade.
+
+TOOLS_VIAJAI = [
+    {
+        "name": "consultar_previsao_folgas",
+        "description": "Previsao de folga por colaborador ativo: urgencia, dias restantes, datas previstas, previsao de gasto. Use para 'quem esta de folga', 'quem precisa viajar', 'urgencia'.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "consultar_pendencias_import",
+        "description": "Linhas de import RE090 que nao bateram com nenhum colaborador do RH (pendencia de revisao manual).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "apenas_nao_resolvidas": {"type": "boolean", "description": "So' as ainda nao marcadas como resolvidas (padrao true)"}
+            },
+        },
+    },
+    {
+        "name": "consultar_historico_folga",
+        "description": "Historico de mudancas de status de folga (quem mudou, quando, de qual valor pra qual).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limite": {"type": "integer", "description": "Quantos registros (padrao 200)"}},
+        },
+    },
+    {
+        "name": "consultar_desvio_planejamento",
+        "description": "Folgas ja confirmadas/realizadas comparando data prevista x real (quantos dias atrasou/antecipou na saida e no retorno).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limite": {"type": "integer", "description": "Quantos registros (padrao 200)"}},
+        },
+    },
+    {
+        "name": "consultar_previsao_gasto_colaborador",
+        "description": "Previsao de gasto por colaborador: media do historico da propria pessoa, ou do canteiro/obra dela se nao tiver historico proprio. Devolve tambem 'base_previsao' (colaborador/canteiro/obra/sem_dado) - sempre informe essa base na resposta.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "consultar_comparativo_custo_folga",
+        "description": "Folgas com custo real ja registrado (passagem + gasto extra), cruzado com o desvio de planejamento em dias.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limite": {"type": "integer", "description": "Quantos registros (padrao 200)"}},
+        },
+    },
+    {
+        "name": "consultar_sugestao_fornecedor_rota",
+        "description": "Fornecedor/companhia mais usado historicamente numa rota especifica (origem/destino precisam bater com o texto ja registrado).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origem": {"type": "string"},
+                "destino": {"type": "string"},
+            },
+            "required": ["origem", "destino"],
+        },
+    },
+    {
+        "name": "consultar_comparar_modais_rota",
+        "description": "Compara preco medio e duracao media entre modais (aviao/onibus/carro/etc) numa rota especifica, baseado no que ja foi registrado.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origem": {"type": "string"},
+                "destino": {"type": "string"},
+            },
+            "required": ["origem", "destino"],
+        },
+    },
+    {
+        "name": "consultar_resumo_custo_por_rota",
+        "description": "Soma de gasto e quantidade de passagens por rota (origem/destino), juntando lancamento rapido e trecho registrado.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limite": {"type": "integer", "description": "Quantas rotas (padrao 100)"}},
+        },
+    },
+    {
+        "name": "consultar_gasto_por_periodo",
+        "description": "Soma de todo gasto registrado (trecho + gasto extra + lancamento rapido), agrupado por mes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"meses": {"type": "integer", "description": "Quantos meses pra tras (padrao 12)"}},
+        },
+    },
+    {
+        "name": "consultar_lancamentos_rapidos",
+        "description": "Lancamentos rapidos de compra registrados sem apontar folga especifica (ex.: 'comprei 10 passagens do Ceara pra SP').",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limite": {"type": "integer", "description": "Quantos registros (padrao 200)"}},
+        },
+    },
+    {
+        "name": "consultar_localizacoes_canteiro",
+        "description": "Localizacao (cidade/UF/endereco/aeroporto mais proximo) dos canteiros que ja tem esse cadastro feito - nem todos tem ainda, e' alimentado aos poucos.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
+
+def _executar_ferramenta_viajai(supabase, nome, entrada):
+    try:
+        if nome == "consultar_previsao_folgas":
+            r = supabase.rpc("viajai_previsao_folgas").execute()
+        elif nome == "consultar_pendencias_import":
+            r = supabase.rpc("viajai_listar_pendencias_import", {
+                "p_apenas_nao_resolvidas": entrada.get("apenas_nao_resolvidas", True),
+            }).execute()
+        elif nome == "consultar_historico_folga":
+            r = supabase.rpc("viajai_listar_historico_folga", {"p_limite": entrada.get("limite", 200)}).execute()
+        elif nome == "consultar_desvio_planejamento":
+            r = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": entrada.get("limite", 200)}).execute()
+        elif nome == "consultar_previsao_gasto_colaborador":
+            r = supabase.rpc("viajai_previsao_gasto_colaborador").execute()
+        elif nome == "consultar_comparativo_custo_folga":
+            r = supabase.rpc("viajai_comparativo_custo_folga", {"p_limite": entrada.get("limite", 200)}).execute()
+        elif nome == "consultar_sugestao_fornecedor_rota":
+            r = supabase.rpc("viajai_sugestao_fornecedor_rota", {
+                "p_origem": entrada.get("origem", ""), "p_destino": entrada.get("destino", ""),
+            }).execute()
+        elif nome == "consultar_comparar_modais_rota":
+            r = supabase.rpc("viajai_comparar_modais_rota", {
+                "p_origem": entrada.get("origem", ""), "p_destino": entrada.get("destino", ""),
+            }).execute()
+        elif nome == "consultar_resumo_custo_por_rota":
+            r = supabase.rpc("viajai_resumo_custo_por_rota", {"p_limite": entrada.get("limite", 100)}).execute()
+        elif nome == "consultar_gasto_por_periodo":
+            r = supabase.rpc("viajai_gasto_por_periodo", {"p_meses": entrada.get("meses", 12)}).execute()
+        elif nome == "consultar_lancamentos_rapidos":
+            r = supabase.rpc("viajai_listar_lancamentos_rapidos", {"p_limite": entrada.get("limite", 200)}).execute()
+        elif nome == "consultar_localizacoes_canteiro":
+            r = supabase.rpc("viajai_listar_localizacoes_canteiro").execute()
+        else:
+            return {"erro": "ferramenta desconhecida"}
+        return r.data if r.data else []
+    except Exception as e:
+        return {"erro": str(e)}
+
+
+def _montar_system_prompt_viajai(usuario_email):
+    return (
+        "Voce e o assistente do Viaj.AI, sistema de gestao de folgas/viagens/custo de "
+        "colaboradores em obra da EnerMais. Ajuda a Amanda (compradora/logistica) e outras "
+        f"pessoas autorizadas. A pessoa logada agora e {usuario_email}.\n\n"
+        f"A data de HOJE e {date.today().isoformat()} — use esse fato pra resolver qualquer "
+        "expressao de data relativa ('proximos 30 dias', 'esse mes', 'mes passado'), nunca "
+        "calcule data de cabeca.\n\n"
+        "Responda so com dado que veio de verdade das ferramentas — nunca invente numero, "
+        "preco, rota ou nome de fornecedor. Se a ferramenta nao trouxer dado suficiente, "
+        "diga isso claramente em vez de estimar ou supor.\n\n"
+        "IMPORTANTE sobre preco de passagem: voce NAO tem acesso a busca de preco em tempo "
+        "real (decisao de projeto, 02/09) — toda 'previsao' ou 'estimativa' de custo vem do "
+        "HISTORICO ja registrado no proprio Viaj.AI, nunca do seu conhecimento geral sobre "
+        "preco de passagem. Sem historico suficiente pra uma rota ou colaborador, diga isso "
+        "em vez de chutar um valor plausivel.\n\n"
+        "Neste momento voce so CONSULTA — nao registra nada no banco (sem ferramenta de "
+        "escrita disponivel ainda). Se pedirem pra registrar compra/gasto, explique que "
+        "ainda nao registra por aqui e oriente a usar a tela 'Custo & Passagens'.\n\n"
+        "Guia de qual ferramenta usar:\n"
+        "- quem esta de folga / precisa viajar / urgencia -> consultar_previsao_folgas.\n"
+        "- pendencia de import / nao bateu no RH -> consultar_pendencias_import.\n"
+        "- historico de mudanca de status de folga -> consultar_historico_folga.\n"
+        "- quem atrasou / desvio do planejado -> consultar_desvio_planejamento.\n"
+        "- previsao de gasto por colaborador -> consultar_previsao_gasto_colaborador "
+        "(sempre informe o 'base_previsao' que vier na resposta).\n"
+        "- custo real x desvio de uma folga -> consultar_comparativo_custo_folga.\n"
+        "- qual companhia mais usamos numa rota -> consultar_sugestao_fornecedor_rota "
+        "(precisa origem e destino).\n"
+        "- aviao x onibus x carro numa rota -> consultar_comparar_modais_rota (precisa "
+        "origem e destino).\n"
+        "- gasto total por rota -> consultar_resumo_custo_por_rota.\n"
+        "- gasto por mes/periodo -> consultar_gasto_por_periodo.\n"
+        "- lancamentos rapidos recentes -> consultar_lancamentos_rapidos.\n"
+        "- onde fica um canteiro / aeroporto mais proximo -> consultar_localizacoes_canteiro "
+        "(nem todo canteiro tem cadastro ainda, avise se nao achar)."
+    )
+
+
+def pagina_chat(supabase):
+    st.subheader("Assistente Viaj.AI")
+    st.caption(
+        "Converse em português sobre folgas, urgência, custo e histórico — só responde com "
+        "dado real do Viaj.AI (nunca busca preço na internet nem inventa número). Ainda não "
+        "registra nada por aqui, só consulta."
+    )
+
+    if not ANTHROPIC_API_KEY:
+        st.warning(
+            "Chave da Anthropic ainda não configurada (Secrets do Streamlit Cloud: "
+            "ANTHROPIC_API_KEY) — o assistente não funciona sem ela."
+        )
+        return
+
+    if "mensagens_chat" not in st.session_state:
+        hist = supabase.rpc("viajai_listar_historico_chat", {"p_limite": 50}).execute()
+        st.session_state.mensagens_chat = [
+            {"role": m["papel"], "content": m["conteudo"]} for m in (hist.data or [])
+        ]
+
+    def _escapar_dolar(texto):
+        return texto.replace("$", "\\$")
+
+    for m in st.session_state.mensagens_chat:
+        with st.chat_message(m["role"]):
+            conteudo = m["content"] if isinstance(m["content"], str) else "(ferramenta)"
+            st.markdown(_escapar_dolar(conteudo))
+
+    pergunta = st.chat_input("Pergunte sobre folgas, urgência, custo...")
+
+    # Mesmo padrao 2 fases do TIA.go (evita bug de ordem visto la ja em
+    # producao): grava a pergunta e recarrega antes de chamar a API.
+    if pergunta:
+        st.session_state.mensagens_chat.append({"role": "user", "content": pergunta})
+        supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "user", "p_conteudo": pergunta}).execute()
+        st.rerun()
+
+    if st.session_state.mensagens_chat and st.session_state.mensagens_chat[-1]["role"] == "user":
+        with st.spinner("Consultando..."):
+            texto_final = None
+            try:
+                client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                mensagens_api = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.mensagens_chat
+                    if isinstance(m["content"], str)
+                ]
+                system_prompt = _montar_system_prompt_viajai(st.session_state.usuario)
+
+                resposta = client.messages.create(
+                    model=MODEL_ID, max_tokens=1024, system=system_prompt,
+                    tools=TOOLS_VIAJAI, messages=mensagens_api,
+                )
+                while resposta.stop_reason == "tool_use":
+                    tool_uses = [b for b in resposta.content if b.type == "tool_use"]
+                    resultados = []
+                    for tu in tool_uses:
+                        resultado = _executar_ferramenta_viajai(supabase, tu.name, tu.input)
+                        resultados.append(
+                            {"type": "tool_result", "tool_use_id": tu.id, "content": str(resultado)}
+                        )
+                    mensagens_api.append({"role": "assistant", "content": resposta.content})
+                    mensagens_api.append({"role": "user", "content": resultados})
+                    resposta = client.messages.create(
+                        model=MODEL_ID, max_tokens=1024, system=system_prompt,
+                        tools=TOOLS_VIAJAI, messages=mensagens_api,
+                    )
+                texto_final = "".join(b.text for b in resposta.content if b.type == "text")
+            except Exception as e:
+                texto_final = f"Erro ao consultar o assistente: {e}"
+
+        st.session_state.mensagens_chat.append({"role": "assistant", "content": texto_final})
+        supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "assistant", "p_conteudo": texto_final}).execute()
+        st.rerun()
+
+
 def main():
     if "sessao" not in st.session_state:
         tela_login()
@@ -965,7 +1243,7 @@ def main():
         st.write(f"Logado como: {st.session_state.usuario}")
         pagina = st.radio(
             "Navegação",
-            ["Importar RE090", "Confirmar folgas", "Previsão de folgas", "Custo & Passagens"],
+            ["Importar RE090", "Confirmar folgas", "Previsão de folgas", "Custo & Passagens", "Assistente"],
         )
         if st.button("Sair"):
             supabase.auth.sign_out()
@@ -980,6 +1258,8 @@ def main():
         pagina_previsao(supabase)
     elif pagina == "Custo & Passagens":
         pagina_custo_passagens(supabase)
+    elif pagina == "Assistente":
+        pagina_chat(supabase)
 
 
 if __name__ == "__main__":
