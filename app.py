@@ -1,4 +1,4 @@
-# Viaj.AI — v0.2 (login + import RE090 + previsão/pendências) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v0.4 (tema escuro + logo sidebar + import multi-arquivo + lote/reversao) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -47,13 +47,13 @@ def logo_base64():
 
 def render_logo(height=56):
     # Mesmo padrão do TIA.go/Radar/RHDADOS: logo oficial (navy+laranja) em
-    # silhueta via filtro CSS, em vez de arquivo separado. TIA.go usa fundo
-    # escuro -> brightness(0) invert(1) (silhueta branca). Viaj.AI tem fundo
-    # claro -> só brightness(0), sem invert (silhueta preta).
+    # silhueta branca via filtro CSS (brightness(0) invert(1)), sem precisar
+    # de PNG separado. Tema base agora e' "dark" (.streamlit/config.toml),
+    # entao usa o mesmo filtro do TIA.go (fundo escuro -> silhueta branca).
     st.markdown(
         f"""
         <img src="data:image/png;base64,{logo_base64()}" height="{height}"
-             style="filter: brightness(0); margin-bottom: 12px;">
+             style="filter: brightness(0) invert(1); margin-bottom: 12px;">
         """,
         unsafe_allow_html=True,
     )
@@ -160,53 +160,122 @@ def _ler_planilha_re090(arquivo):
     return linhas, None
 
 
+def _importar_um_arquivo(supabase, arquivo):
+    """Processa 1 arquivo RE090: le, abre um lote (import_batch), roda a RPC
+    linha a linha carimbando o lote, fecha o lote com os totais. Devolve
+    (nome_arquivo, resultados, erro_leitura)."""
+    linhas, erro = _ler_planilha_re090(arquivo)
+    if erro:
+        return arquivo.name, None, erro
+
+    batch = supabase.rpc("viajai_criar_import_batch", {
+        "p_nome_arquivo": arquivo.name,
+        "p_total_linhas": len(linhas),
+    }).execute()
+    batch_id = batch.data
+
+    resultados = []
+    for l in linhas:
+        try:
+            resp = supabase.rpc("viajai_importar_re090_linha", {
+                "p_nome_planilha": l["nome"],
+                "p_matricula_planilha": None,
+                "p_texto_obra_canteiro": l["centro_custo"],
+                "p_data_ultimo_retorno": l["data_ultimo_retorno"].isoformat() if l["data_ultimo_retorno"] else None,
+                "p_data_saida_prevista": l["data_saida_prevista"].isoformat() if l["data_saida_prevista"] else None,
+                "p_data_retorno_prevista": l["data_retorno_prevista"].isoformat() if l["data_retorno_prevista"] else None,
+                "p_import_batch_id": batch_id,
+            }).execute()
+            linha_resultado = resp.data[0] if resp.data else {"resultado": "sem_retorno"}
+        except Exception as e:
+            linha_resultado = {"resultado": "erro", "colaborador_id": None, "folga_id": None}
+            st.warning(f"Erro ao importar '{l['nome']}' ({arquivo.name}): {e}")
+        resultados.append({"nome": l["nome"], **linha_resultado})
+
+    criadas = sum(1 for r in resultados if r.get("resultado") == "criada")
+    pendentes = sum(1 for r in resultados if r.get("resultado") == "pendencia")
+    supabase.rpc("viajai_finalizar_import_batch", {
+        "p_batch_id": batch_id,
+        "p_total_criadas": criadas,
+        "p_total_pendencias": pendentes,
+    }).execute()
+
+    return arquivo.name, resultados, None
+
+
 def pagina_importar_re090(supabase):
     st.subheader("Importar RE090")
     st.caption(
-        "Sobe a planilha, resolve cada colaborador contra o RH (ao vivo) e "
-        "grava a folga já com o canteiro espelho. Sem match único, a linha "
-        "vira pendência — nada é perdido, só fica pra você revisar."
+        "Sobe a(s) planilha(s), resolve cada colaborador contra o RH (ao vivo) "
+        "e grava a folga já com o canteiro espelho. Sem match único, a linha "
+        "vira pendência — nada é perdido, só fica pra você revisar. Pode subir "
+        "mais de um arquivo de uma vez — cada arquivo vira 1 lote no histórico, "
+        "revertível separadamente."
     )
 
-    arquivo = st.file_uploader("Planilha RE090 (.xlsx)", type=["xlsx"])
-    if arquivo is not None:
-        linhas, erro = _ler_planilha_re090(arquivo)
-        if erro:
-            st.error(erro)
-        else:
-            st.write(f"{len(linhas)} linha(s) com nome preenchido encontrada(s).")
-            with st.expander("Ver linhas antes de importar"):
-                st.dataframe(linhas)
+    arquivos = st.file_uploader(
+        "Planilha(s) RE090 (.xlsx)", type=["xlsx"], accept_multiple_files=True
+    )
+    if arquivos:
+        pre_leituras = []
+        for arquivo in arquivos:
+            linhas, erro = _ler_planilha_re090(arquivo)
+            pre_leituras.append((arquivo, linhas, erro))
+            if erro:
+                st.error(f"{arquivo.name}: {erro}")
+            else:
+                st.write(f"**{arquivo.name}** — {len(linhas)} linha(s) com nome preenchido.")
+                with st.expander(f"Ver linhas antes de importar — {arquivo.name}"):
+                    st.dataframe(linhas)
 
-            if st.button("Importar", type="primary"):
-                resultados = []
-                erros_rpc = 0
-                for l in linhas:
-                    try:
-                        resp = supabase.rpc("viajai_importar_re090_linha", {
-                            "p_nome_planilha": l["nome"],
-                            "p_matricula_planilha": None,
-                            "p_texto_obra_canteiro": l["centro_custo"],
-                            "p_data_ultimo_retorno": l["data_ultimo_retorno"].isoformat() if l["data_ultimo_retorno"] else None,
-                            "p_data_saida_prevista": l["data_saida_prevista"].isoformat() if l["data_saida_prevista"] else None,
-                            "p_data_retorno_prevista": l["data_retorno_prevista"].isoformat() if l["data_retorno_prevista"] else None,
-                        }).execute()
-                        linha_resultado = resp.data[0] if resp.data else {"resultado": "sem_retorno"}
-                    except Exception as e:
-                        linha_resultado = {"resultado": "erro", "colaborador_id": None, "folga_id": None}
-                        erros_rpc += 1
-                        st.warning(f"Erro ao importar '{l['nome']}': {e}")
-                    resultados.append({"nome": l["nome"], **linha_resultado})
-                st.session_state["resultado_import"] = resultados
-                if erros_rpc:
-                    st.error(f"{erros_rpc} linha(s) deram erro de verdade (não é pendência normal) — ver acima.")
+        if st.button("Importar", type="primary"):
+            resultado_por_arquivo = {}
+            for arquivo, linhas, erro in pre_leituras:
+                if erro:
+                    continue
+                nome, resultados, _ = _importar_um_arquivo(supabase, arquivo)
+                resultado_por_arquivo[nome] = resultados
+            st.session_state["resultado_import"] = resultado_por_arquivo
 
     if "resultado_import" in st.session_state:
-        resultados = st.session_state["resultado_import"]
-        criadas = sum(1 for r in resultados if r.get("resultado") == "criada")
-        pendentes = sum(1 for r in resultados if r.get("resultado") == "pendencia")
-        st.success(f"Resultado do último import: {criadas} folga(s) criada(s), {pendentes} em pendência.")
-        st.dataframe(resultados)
+        for nome_arquivo, resultados in st.session_state["resultado_import"].items():
+            criadas = sum(1 for r in resultados if r.get("resultado") == "criada")
+            pendentes = sum(1 for r in resultados if r.get("resultado") == "pendencia")
+            st.success(f"**{nome_arquivo}**: {criadas} folga(s) criada(s), {pendentes} em pendência.")
+            st.dataframe(resultados)
+
+    st.divider()
+    st.subheader("Histórico de imports")
+    st.caption(
+        "Cada linha é 1 upload. Reverter apaga as folgas criadas por esse "
+        "lote específico — só as que ninguém mexeu ainda (status ainda "
+        "'prevista', sem trecho de viagem associado); o resto fica registrado "
+        "mas não é apagado, pra não perder trabalho já feito em cima."
+    )
+    lotes = supabase.rpc("viajai_listar_import_batches", {"p_limite": 20}).execute()
+    if lotes.data:
+        for lote in lotes.data:
+            cols = st.columns([3, 2, 2, 2, 2])
+            cols[0].write(f"{lote['nome_arquivo']}")
+            cols[1].write(lote["criado_em"][:16].replace("T", " "))
+            cols[2].write(f"{lote['total_criadas']} criada(s)")
+            cols[3].write(f"{lote['total_pendencias']} pendência(s)")
+            if lote["revertido"]:
+                cols[4].write("↩️ revertido")
+            else:
+                if cols[4].button("Reverter", key=f"reverter_{lote['id']}"):
+                    rev = supabase.rpc(
+                        "viajai_reverter_import_batch", {"p_batch_id": lote["id"]}
+                    ).execute()
+                    r = rev.data[0] if rev.data else {}
+                    st.success(
+                        f"Revertido: {r.get('folgas_removidas', 0)} folga(s) removida(s), "
+                        f"{r.get('folgas_puladas', 0)} pulada(s) (já tinham sido mexidas), "
+                        f"{r.get('pendencias_removidas', 0)} pendência(s) removida(s)."
+                    )
+                    st.rerun()
+    else:
+        st.caption("Nenhum import feito ainda.")
 
     st.divider()
     st.subheader("Pendências abertas")
@@ -242,15 +311,14 @@ def main():
     supabase = get_client()
     supabase.postgrest.auth(st.session_state.sessao.access_token)
 
-    st.sidebar.write(f"Logado como: {st.session_state.usuario}")
-    pagina = st.sidebar.radio("Navegação", ["Importar RE090", "Previsão de folgas"])
-    if st.sidebar.button("Sair"):
-        supabase.auth.sign_out()
-        del st.session_state.sessao
-        st.rerun()
-
-    render_logo(height=48)
-    st.caption("Viaj.AI")
+    with st.sidebar:
+        render_logo(height=56)
+        st.write(f"Logado como: {st.session_state.usuario}")
+        pagina = st.radio("Navegação", ["Importar RE090", "Previsão de folgas"])
+        if st.button("Sair"):
+            supabase.auth.sign_out()
+            del st.session_state.sessao
+            st.rerun()
 
     if pagina == "Importar RE090":
         pagina_importar_re090(supabase)
