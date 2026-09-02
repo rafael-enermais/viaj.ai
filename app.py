@@ -1,4 +1,4 @@
-# Viaj.AI — v0.6 (fecha o ciclo: tela Confirmar folgas) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v0.7 (Confirmar folgas editavel direto na tabela + historico) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -291,75 +291,101 @@ def pagina_importar_re090(supabase):
         st.caption("Nenhuma pendência em aberto.")
 
 
-_STATUS_LABELS = {
-    "confirmada": "Confirmada (vai viajar mesmo, datas batem)",
-    "em_andamento": "Em andamento (já saiu, ainda não voltou)",
-    "realizada": "Realizada (já voltou)",
-    "vendida": "Vendida (não sai — converteu em pagamento, continua trabalhando)",
-    "cancelada": "Cancelada (não vai acontecer)",
-}
+_STATUS_OPCOES = ["prevista", "confirmada", "em_andamento", "realizada", "vendida", "cancelada"]
 
 
 def pagina_confirmar_folgas(supabase):
     st.subheader("Confirmar folgas")
     st.caption(
-        "Fecha o ciclo: aqui você registra o que realmente aconteceu com "
-        "cada folga que caiu como 'prevista' (via import ou manual). Sem "
-        "isso, a Previsão de folgas nunca reflete a realidade — só o que "
-        "foi planejado."
+        "Fecha o ciclo: registre aqui o que realmente aconteceu com cada "
+        "folga que caiu como 'prevista' (via import ou manual). Sem isso, "
+        "a Previsão de folgas nunca reflete a realidade — só o que foi "
+        "planejado. Edita direto na tabela: muda o 'Status novo' de quem "
+        "mudou, preenche data real se for o caso, e clica em Salvar no "
+        "final — quem ficar em 'prevista' não é tocado."
     )
 
-    previstas = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 200}).execute()
+    previstas = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 300}).execute()
     if not previstas.data:
         st.caption("Nenhuma folga 'prevista' aguardando confirmação no momento.")
-        return
+    else:
+        base = pd.DataFrame(previstas.data)
+        base["status_novo"] = "prevista"
+        base["data_saida_real"] = pd.NaT
+        base["data_retorno_real"] = pd.NaT
+        base["motivo_venda"] = ""
 
-    opcoes = {
-        f"{p['nome']} — saída prevista {p['data_saida_prevista'] or '?'} "
-        f"({p['obra_nome'] or p['canteiro_nome'] or 'obra ?'})": p
-        for p in previstas.data
-    }
-    escolha = st.selectbox("Selecione a folga a confirmar", list(opcoes.keys()))
-    p = opcoes[escolha]
+        editado = st.data_editor(
+            base,
+            column_order=[
+                "nome", "obra_nome", "canteiro_nome",
+                "data_saida_prevista", "data_retorno_prevista",
+                "status_novo", "data_saida_real", "data_retorno_real", "motivo_venda",
+            ],
+            column_config={
+                "nome": st.column_config.TextColumn("Nome", disabled=True),
+                "obra_nome": st.column_config.TextColumn("Obra", disabled=True),
+                "canteiro_nome": st.column_config.TextColumn("Canteiro", disabled=True),
+                "data_saida_prevista": st.column_config.DateColumn("Saída prevista", disabled=True),
+                "data_retorno_prevista": st.column_config.DateColumn("Retorno previsto", disabled=True),
+                "status_novo": st.column_config.SelectboxColumn(
+                    "Status novo", options=_STATUS_OPCOES, required=True,
+                    help="Deixa 'prevista' pra não mexer nessa linha.",
+                ),
+                "data_saida_real": st.column_config.DateColumn(
+                    "Saída real", help="Preenche se marcou 'em_andamento' ou 'realizada'."
+                ),
+                "data_retorno_real": st.column_config.DateColumn(
+                    "Retorno real", help="Preenche se marcou 'realizada'."
+                ),
+                "motivo_venda": st.column_config.TextColumn(
+                    "Motivo (se vendida)", help="Opcional, só faz sentido se marcou 'vendida'."
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="editor_confirmar_folgas",
+        )
 
-    with st.form("confirmar_folga"):
-        status_label = st.radio("O que aconteceu de verdade?", list(_STATUS_LABELS.values()))
-        status = next(k for k, v in _STATUS_LABELS.items() if v == status_label)
+        if st.button("Salvar alterações", type="primary"):
+            mudou = editado[editado["status_novo"] != "prevista"]
+            if mudou.empty:
+                st.info("Nenhuma linha teve o status alterado — nada pra salvar.")
+            else:
+                erros = 0
+                for _, linha in mudou.iterrows():
+                    try:
+                        supabase.rpc("viajai_atualizar_folga", {
+                            "p_folga_id": int(linha["folga_id"]),
+                            "p_status": linha["status_novo"],
+                            "p_data_saida_real": (
+                                linha["data_saida_real"].isoformat()
+                                if pd.notna(linha["data_saida_real"]) else None
+                            ),
+                            "p_data_retorno_real": (
+                                linha["data_retorno_real"].isoformat()
+                                if pd.notna(linha["data_retorno_real"]) else None
+                            ),
+                            "p_motivo_venda": linha["motivo_venda"] or None,
+                        }).execute()
+                    except Exception as e:
+                        erros += 1
+                        st.error(f"Erro ao salvar {linha['nome']}: {e}")
+                sucesso = len(mudou) - erros
+                if sucesso:
+                    st.success(f"{sucesso} folga(s) atualizada(s).")
+                st.rerun()
 
-        data_saida_real = None
-        data_retorno_real = None
-        motivo_venda = None
-
-        if status in ("em_andamento", "realizada"):
-            data_saida_real = st.date_input(
-                "Data de saída real", value=p["data_saida_prevista"] or date.today()
-            )
-        if status == "realizada":
-            data_retorno_real = st.date_input(
-                "Data de retorno real", value=p["data_retorno_prevista"] or date.today()
-            )
-        if status == "vendida":
-            motivo_venda = st.text_input("Motivo/observação da venda (opcional)")
-
-        enviar = st.form_submit_button("Confirmar", type="primary")
-
-    if enviar:
-        try:
-            supabase.rpc("viajai_atualizar_folga", {
-                "p_folga_id": p["folga_id"],
-                "p_status": status,
-                "p_data_saida_real": data_saida_real.isoformat() if data_saida_real else None,
-                "p_data_retorno_real": data_retorno_real.isoformat() if data_retorno_real else None,
-                "p_motivo_venda": motivo_venda,
-            }).execute()
-            st.success(f"Folga de {p['nome']} atualizada pra '{status}'.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao confirmar: {e}")
+        st.caption(f"{len(previstas.data)} folga(s) prevista(s) aguardando confirmação.")
 
     st.divider()
-    st.caption(f"{len(previstas.data)} folga(s) prevista(s) aguardando confirmação.")
-    st.dataframe(previstas.data, use_container_width=True, hide_index=True)
+    st.subheader("Histórico")
+    st.caption("Últimas mudanças registradas — quem, quando, o que mudou.")
+    hist = supabase.rpc("viajai_listar_historico_folga", {"p_limite": 100}).execute()
+    if hist.data:
+        st.dataframe(hist.data, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Nenhuma mudança registrada ainda.")
 
 
 _ORDEM_URGENCIA = {"critico": 0, "atencao": 1, "normal": 2}
