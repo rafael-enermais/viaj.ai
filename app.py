@@ -1,4 +1,4 @@
-# Viaj.AI — v1.2 (Assistente/chat com tool-use Anthropic, so consulta, historico persistido) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v2.0 (Assistente/chat + painel lateral reativo: tabela/mapa junto da resposta) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -1150,6 +1150,14 @@ def _montar_system_prompt_viajai(usuario_email):
     )
 
 
+FERRAMENTAS_VISUAIS_VIAJAI = {tool["name"] for tool in TOOLS_VIAJAI}
+# Toda ferramenta de consulta pode virar tabela no painel lateral do chat;
+# a de localizacao de canteiro tambem tenta virar mapa (se tiver lat/lon
+# cadastrada) — pedido do Rafael 02/09: "gerar um dash interativo ao lado,
+# mostrando tabela, mapa". Mesmo padrao do TIA.go (col_dash / dash_extra),
+# adaptado pras ferramentas do Viaj.AI.
+
+
 def pagina_chat(supabase):
     st.subheader("Assistente Viaj.AI")
     st.caption(
@@ -1174,58 +1182,90 @@ def pagina_chat(supabase):
     def _escapar_dolar(texto):
         return texto.replace("$", "\\$")
 
-    for m in st.session_state.mensagens_chat:
-        with st.chat_message(m["role"]):
-            conteudo = m["content"] if isinstance(m["content"], str) else "(ferramenta)"
-            st.markdown(_escapar_dolar(conteudo))
+    col_chat, col_dash = st.columns([3, 2])
 
-    pergunta = st.chat_input("Pergunte sobre folgas, urgência, custo...")
+    with col_chat:
+        for m in st.session_state.mensagens_chat:
+            with st.chat_message(m["role"]):
+                conteudo = m["content"] if isinstance(m["content"], str) else "(ferramenta)"
+                st.markdown(_escapar_dolar(conteudo))
 
-    # Mesmo padrao 2 fases do TIA.go (evita bug de ordem visto la ja em
-    # producao): grava a pergunta e recarrega antes de chamar a API.
-    if pergunta:
-        st.session_state.mensagens_chat.append({"role": "user", "content": pergunta})
-        supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "user", "p_conteudo": pergunta}).execute()
-        st.rerun()
+        pergunta = st.chat_input("Pergunte sobre folgas, urgência, custo...")
 
-    if st.session_state.mensagens_chat and st.session_state.mensagens_chat[-1]["role"] == "user":
-        with st.spinner("Consultando..."):
-            texto_final = None
-            try:
-                client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-                mensagens_api = [
-                    {"role": m["role"], "content": m["content"]}
-                    for m in st.session_state.mensagens_chat
-                    if isinstance(m["content"], str)
-                ]
-                system_prompt = _montar_system_prompt_viajai(st.session_state.usuario)
+        # Mesmo padrao 2 fases do TIA.go (evita bug de ordem visto la ja em
+        # producao): grava a pergunta e recarrega antes de chamar a API.
+        if pergunta:
+            st.session_state.mensagens_chat.append({"role": "user", "content": pergunta})
+            supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "user", "p_conteudo": pergunta}).execute()
+            st.rerun()
 
-                resposta = client.messages.create(
-                    model=MODEL_ID, max_tokens=1024, system=system_prompt,
-                    tools=TOOLS_VIAJAI, messages=mensagens_api,
-                )
-                while resposta.stop_reason == "tool_use":
-                    tool_uses = [b for b in resposta.content if b.type == "tool_use"]
-                    resultados = []
-                    for tu in tool_uses:
-                        resultado = _executar_ferramenta_viajai(supabase, tu.name, tu.input)
-                        resultados.append(
-                            {"type": "tool_result", "tool_use_id": tu.id, "content": str(resultado)}
-                        )
-                    mensagens_api.append({"role": "assistant", "content": resposta.content})
-                    mensagens_api.append({"role": "user", "content": resultados})
+        if st.session_state.mensagens_chat and st.session_state.mensagens_chat[-1]["role"] == "user":
+            with st.spinner("Consultando..."):
+                texto_final = None
+                try:
+                    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                    mensagens_api = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in st.session_state.mensagens_chat
+                        if isinstance(m["content"], str)
+                    ]
+                    system_prompt = _montar_system_prompt_viajai(st.session_state.usuario)
+
                     resposta = client.messages.create(
                         model=MODEL_ID, max_tokens=1024, system=system_prompt,
                         tools=TOOLS_VIAJAI, messages=mensagens_api,
                     )
-                texto_final = "".join(b.text for b in resposta.content if b.type == "text")
-            except Exception as e:
-                texto_final = f"Erro ao consultar o assistente: {e}"
+                    while resposta.stop_reason == "tool_use":
+                        tool_uses = [b for b in resposta.content if b.type == "tool_use"]
+                        resultados = []
+                        for tu in tool_uses:
+                            resultado = _executar_ferramenta_viajai(supabase, tu.name, tu.input)
+                            resultados.append(
+                                {"type": "tool_result", "tool_use_id": tu.id, "content": str(resultado)}
+                            )
+                            if tu.name in FERRAMENTAS_VISUAIS_VIAJAI:
+                                st.session_state.dash_extra_viajai = {
+                                    "tool": tu.name,
+                                    "input": tu.input,
+                                    "resultado": resultado,
+                                }
+                        mensagens_api.append({"role": "assistant", "content": resposta.content})
+                        mensagens_api.append({"role": "user", "content": resultados})
+                        resposta = client.messages.create(
+                            model=MODEL_ID, max_tokens=1024, system=system_prompt,
+                            tools=TOOLS_VIAJAI, messages=mensagens_api,
+                        )
+                    texto_final = "".join(b.text for b in resposta.content if b.type == "text")
+                except Exception as e:
+                    texto_final = f"Erro ao consultar o assistente: {e}"
 
-        st.session_state.mensagens_chat.append({"role": "assistant", "content": texto_final})
-        supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "assistant", "p_conteudo": texto_final}).execute()
-        st.rerun()
+            st.session_state.mensagens_chat.append({"role": "assistant", "content": texto_final})
+            supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "assistant", "p_conteudo": texto_final}).execute()
+            st.rerun()
 
+    with col_dash:
+        st.caption("Painel — última consulta com dado")
+        extra = st.session_state.get("dash_extra_viajai")
+        if not extra:
+            st.info(
+                "Faça uma pergunta que puxe dado (folga, custo, canteiro...) pra ver a "
+                "tabela (e mapa, se for canteiro com localização) aqui."
+            )
+        else:
+            resultado = extra.get("resultado")
+            if not isinstance(resultado, list) or not resultado:
+                st.write(resultado if resultado else "(sem dado pra essa consulta)")
+            else:
+                df_dash = pd.DataFrame(resultado)
+                st.dataframe(df_dash, use_container_width=True, hide_index=True)
+                if extra.get("tool") == "consultar_localizacoes_canteiro" and {
+                    "latitude", "longitude"
+                }.issubset(df_dash.columns):
+                    df_mapa = df_dash.dropna(subset=["latitude", "longitude"])
+                    if not df_mapa.empty:
+                        st.map(df_mapa, latitude="latitude", longitude="longitude", size=15)
+                    else:
+                        st.caption("Nenhum canteiro com latitude/longitude cadastrada ainda.")
 
 def main():
     if "sessao" not in st.session_state:
