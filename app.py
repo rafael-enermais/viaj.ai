@@ -1,4 +1,4 @@
-# Viaj.AI — v2.0 (Assistente/chat + painel lateral reativo: tabela/mapa junto da resposta) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v2.1 (fix: chat vinha mudo em pergunta complexa, max_tokens 1024->4096 + aviso em vez de bolha vazia) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -1212,10 +1212,16 @@ def pagina_chat(supabase):
                     system_prompt = _montar_system_prompt_viajai(st.session_state.usuario)
 
                     resposta = client.messages.create(
-                        model=MODEL_ID, max_tokens=1024, system=system_prompt,
+                        model=MODEL_ID, max_tokens=4096, system=system_prompt,
                         tools=TOOLS_VIAJAI, messages=mensagens_api,
                     )
-                    while resposta.stop_reason == "tool_use":
+                    # Limite de voltas de ferramenta (protecao contra loop
+                    # longo demais em pergunta com muito calculo/data
+                    # encadeado - achado 02/09: pergunta complexa de
+                    # previsao ficou sem resposta nenhuma, ver nota abaixo).
+                    _voltas_ferramenta = 0
+                    while resposta.stop_reason == "tool_use" and _voltas_ferramenta < 8:
+                        _voltas_ferramenta += 1
                         tool_uses = [b for b in resposta.content if b.type == "tool_use"]
                         resultados = []
                         for tu in tool_uses:
@@ -1232,10 +1238,33 @@ def pagina_chat(supabase):
                         mensagens_api.append({"role": "assistant", "content": resposta.content})
                         mensagens_api.append({"role": "user", "content": resultados})
                         resposta = client.messages.create(
-                            model=MODEL_ID, max_tokens=1024, system=system_prompt,
+                            model=MODEL_ID, max_tokens=4096, system=system_prompt,
                             tools=TOOLS_VIAJAI, messages=mensagens_api,
                         )
                     texto_final = "".join(b.text for b in resposta.content if b.type == "text")
+                    # Achado 02/09: pergunta com bastante calculo (varias
+                    # ferramentas + conta de data encadeada) as vezes cortava
+                    # a resposta sem nenhum texto (stop_reason vinha
+                    # "max_tokens" bem no meio de uma chamada de ferramenta,
+                    # o while acima nao pega isso porque so continua se
+                    # stop_reason == "tool_use") - bolha vazia no chat, sem
+                    # erro nenhum pra avisar o que houve. max_tokens subiu
+                    # de 1024 pra 4096 (reduz bastante a chance) e, se ainda
+                    # assim vier vazio, avisa em vez de ficar mudo.
+                    if not texto_final.strip():
+                        if resposta.stop_reason == "max_tokens":
+                            texto_final = (
+                                "A resposta ficou grande demais e foi cortada antes de terminar "
+                                "(pergunta com bastante calculo/etapa junto). Tenta perguntar em "
+                                "partes menores ou de um jeito mais direto."
+                            )
+                        elif _voltas_ferramenta >= 8:
+                            texto_final = (
+                                "Essa pergunta precisou de muitas consultas em sequencia e eu parei "
+                                "antes de concluir, pra não travar. Tenta quebrar em perguntas menores."
+                            )
+                        else:
+                            texto_final = "Não consegui gerar uma resposta pra essa pergunta — tenta reformular."
                 except Exception as e:
                     texto_final = f"Erro ao consultar o assistente: {e}"
 
