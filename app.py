@@ -1,4 +1,4 @@
-# Viaj.AI — v6.0 (bugfix: lancamento rapido via chat agora suporta VARIAS propostas pendentes ao mesmo tempo - antes cada nova proposta sobrescrevia a anterior no session_state e so a ultima sobrevivia; painel ganhou confirmar/cancelar individual + em lote) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v6.1 (bugfix: previsao de gasto por colaborador so devolvia ID, sem nome - chat nao conseguia dizer de quem era; RPC (schema_v0.18) agora devolve nome/canteiro/obra junto, merge da tela Previsao de folgas ajustado pra nao colidir com as colunas que ja tinha) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -535,7 +535,15 @@ def pagina_previsao(supabase):
     gasto_resp = supabase.rpc("viajai_previsao_gasto_colaborador").execute()
     if gasto_resp.data:
         df_gasto = pd.DataFrame(gasto_resp.data)
-        df = df.merge(df_gasto, on="colaborador_id", how="left")
+        # so' as colunas novas (previsao_gasto/base_previsao) - "nome"/
+        # "canteiro_nome"/"obra_nome" essa tela JA TEM vindo de
+        # viajai_previsao_folgas; se merge trouxesse de novo, o pandas
+        # criaria nome_x/nome_y e quebraria as referencias abaixo
+        # (schema_v0.18, achado 03/09 revisando antes de aplicar).
+        df = df.merge(
+            df_gasto[["colaborador_id", "previsao_gasto", "base_previsao"]],
+            on="colaborador_id", how="left",
+        )
     else:
         df["previsao_gasto"] = None
         df["base_previsao"] = "sem_dado"
