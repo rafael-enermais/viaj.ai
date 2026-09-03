@@ -1,4 +1,4 @@
-# Viaj.AI — v7.1 (schema_v0.20: previsao de gasto ganha 4o nivel de fallback - media de TODA a empresa, so' dado real ja lancado, nunca inventado - quando colaborador/canteiro/obra nao tem nenhum historico proprio ainda; tool description e system prompt do chat atualizados pra explicar esse novo 'base_previsao=empresa') — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v7.2 (bugfix real: pg_get_functiondef confirmou schema_v0.19 ativo e calculo correto (1280), mas chat repetia R$640 - causa raiz achada: modelo respondia com o valor da PROPRIA resposta anterior (persistida no historico da conversa) em vez de chamar a ferramenta de novo; system prompt agora instrui explicitamente a sempre re-chamar a ferramenta em pergunta repetida, nunca confiar em resposta anterior pra dado que pode ter mudado) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -1386,6 +1386,13 @@ def _montar_system_prompt_viajai(usuario_email):
         "HISTORICO ja registrado no proprio Viaj.AI, nunca do seu conhecimento geral sobre "
         "preco de passagem. Sem historico suficiente pra uma rota ou colaborador, diga isso "
         "em vez de chutar um valor plausivel.\n\n"
+        "IMPORTANTE sobre pergunta repetida: se o usuario perguntar de novo algo que voce "
+        "ja respondeu antes NESSA MESMA conversa (ex.: previsao de gasto, previsao de folga, "
+        "qualquer numero que pode ter mudado), CHAME A FERRAMENTA DE NOVO, nunca repita o "
+        "valor que voce mesmo disse antes so' porque ele ja esta na conversa - o dado no "
+        "banco pode ter mudado entre uma pergunta e outra (ex.: a pessoa acabou de "
+        "confirmar um lancamento novo). Sua propria resposta anterior NAO e' fonte "
+        "confiavel pra responder de novo, so' a ferramenta e'.\n\n"
         "Voce PODE propor o registro de uma compra de passagem via "
         "propor_lancamento_rapido quando o usuario contar que comprou (ex.: 'comprei 10 "
         "passagens do Ceara pra SP por 3500') — mas isso NUNCA grava direto: so' monta uma "
