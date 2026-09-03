@@ -1,4 +1,4 @@
-# Viaj.AI — v3.0 (Assistente com ACAO: propor lancamento rapido por linguagem natural, grava so' apos confirmacao humana) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v4.0 (apagar/desfazer lancamento rapido - undo no chat + na lista, RPC nova schema_v0.16) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -930,6 +930,23 @@ def pagina_custo_passagens(supabase):
             df_lanc = pd.DataFrame(lancs.data)
             st.dataframe(df_lanc, hide_index=True, use_container_width=True)
             _botao_exportar_excel(df_lanc, "viajai_lancamentos_rapidos.xlsx")
+
+            # Apagar (teste ou registro errado) - pedido do Rafael 03/09,
+            # RPC nova em schema_v0.16 (viajai_apagar_lancamento_rapido).
+            with st.expander("Apagar um lançamento (teste ou erro de digitação)"):
+                df_lanc["_rotulo"] = df_lanc.apply(
+                    lambda r: f"#{r['id']} — {r['origem']} -> {r['destino']} — R$ {r['valor_total']:.2f} — {r.get('observacao') or ''}",
+                    axis=1,
+                )
+                rotulo_apagar = st.selectbox("Qual?", df_lanc["_rotulo"], key="lr_apagar_select")
+                id_apagar = int(df_lanc.loc[df_lanc["_rotulo"] == rotulo_apagar, "id"].iloc[0])
+                if st.button("🗑️ Apagar este lançamento", key="lr_apagar_btn"):
+                    try:
+                        supabase.rpc("viajai_apagar_lancamento_rapido", {"p_id": id_apagar}).execute()
+                        st.success("Apagado.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Não consegui apagar (rodou o schema_v0.16 no Supabase?): {e}")
         else:
             st.caption("Nenhum lançamento rápido ainda.")
 
@@ -1358,12 +1375,21 @@ def pagina_chat(supabase):
                 cancelar = col_no.form_submit_button("Cancelar", use_container_width=True)
 
             if confirmar:
-                supabase.rpc("viajai_registrar_lancamento_rapido", {
+                _novo_id = supabase.rpc("viajai_registrar_lancamento_rapido", {
                     "p_origem": c_origem, "p_destino": c_destino, "p_valor_total": c_valor,
                     "p_quantidade": int(c_qtd), "p_modal": c_modal,
                     "p_data": c_data.isoformat(), "p_observacao": c_obs or None,
-                }).execute()
+                }).execute().data
                 del st.session_state.acao_pendente_viajai
+                # Guarda o id pra oferecer "Desfazer" na hora - pedido do
+                # Rafael 03/09 (testar e conseguir apagar/desfazer facil,
+                # sem precisar de SQL Editor). schema_v0.16 precisa estar
+                # rodado (viajai_apagar_lancamento_rapido) - se nao estiver,
+                # o botao "Desfazer" abaixo vai dar erro claro na hora.
+                st.session_state.ultimo_lancamento_viajai = {
+                    "id": _novo_id,
+                    "resumo": f"{int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}",
+                }
                 st.session_state.mensagens_chat.append({
                     "role": "assistant",
                     "content": f"Registrado: {int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}.",
@@ -1372,11 +1398,26 @@ def pagina_chat(supabase):
                     "p_papel": "assistant",
                     "p_conteudo": f"Registrado: {int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}.",
                 }).execute()
-                st.success("Registrado.")
                 st.rerun()
             elif cancelar:
                 del st.session_state.acao_pendente_viajai
                 st.rerun()
+
+        _ultimo = st.session_state.get("ultimo_lancamento_viajai")
+        if _ultimo:
+            st.success(f"Registrado: {_ultimo['resumo']}")
+            if st.button("↩️ Desfazer esse registro", key="btn_desfazer_ultimo_lancamento"):
+                try:
+                    supabase.rpc("viajai_apagar_lancamento_rapido", {"p_id": _ultimo["id"]}).execute()
+                    del st.session_state.ultimo_lancamento_viajai
+                    st.success("Desfeito.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Não consegui desfazer (rodou o schema_v0.16 no Supabase?): {e}")
+            if st.button("Ok, manter", key="btn_manter_ultimo_lancamento"):
+                del st.session_state.ultimo_lancamento_viajai
+                st.rerun()
+        if acao or _ultimo:
             st.divider()
 
         st.caption("Painel — última consulta com dado")
