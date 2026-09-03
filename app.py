@@ -1,4 +1,4 @@
-# Viaj.AI — v4.0 (apagar/desfazer lancamento rapido - undo no chat + na lista, RPC nova schema_v0.16) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v4.1 (fix: chat_input fixo embaixo + historico com rolagem propria, truncamento sempre avisado, resumo em vez de listar tudo) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -1188,6 +1188,11 @@ def _montar_system_prompt_viajai(usuario_email):
         "Responda so com dado que veio de verdade das ferramentas — nunca invente numero, "
         "preco, rota ou nome de fornecedor. Se a ferramenta nao trouxer dado suficiente, "
         "diga isso claramente em vez de estimar ou supor.\n\n"
+        "Se o resultado de uma ferramenta trouxer MUITOS registros (mais de uns 15), "
+        "RESUMA com numero/agregado em vez de listar todo mundo pelo nome - isso evita "
+        "resposta gigante e cortada pela metade. So liste nomes um por um se forem poucos "
+        "(ate uns 15) ou se a pessoa pedir a lista completa explicitamente. A tabela "
+        "completa sempre aparece no painel lateral de qualquer forma.\n\n"
         "IMPORTANTE sobre preco de passagem: voce NAO tem acesso a busca de preco em tempo "
         "real (decisao de projeto, 02/09) — toda 'previsao' ou 'estimativa' de custo vem do "
         "HISTORICO ja registrado no proprio Viaj.AI, nunca do seu conhecimento geral sobre "
@@ -1259,92 +1264,20 @@ def pagina_chat(supabase):
     col_chat, col_dash = st.columns([3, 2])
 
     with col_chat:
-        for m in st.session_state.mensagens_chat:
-            with st.chat_message(m["role"]):
-                conteudo = m["content"] if isinstance(m["content"], str) else "(ferramenta)"
-                st.markdown(_escapar_dolar(conteudo))
-
-        pergunta = st.chat_input("Pergunte sobre folgas, urgência, custo...")
-
-        # Mesmo padrao 2 fases do TIA.go (evita bug de ordem visto la ja em
-        # producao): grava a pergunta e recarrega antes de chamar a API.
-        if pergunta:
-            st.session_state.mensagens_chat.append({"role": "user", "content": pergunta})
-            supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "user", "p_conteudo": pergunta}).execute()
-            st.rerun()
-
-        if st.session_state.mensagens_chat and st.session_state.mensagens_chat[-1]["role"] == "user":
-            with st.spinner("Consultando..."):
-                texto_final = None
-                try:
-                    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-                    mensagens_api = [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in st.session_state.mensagens_chat
-                        if isinstance(m["content"], str)
-                    ]
-                    system_prompt = _montar_system_prompt_viajai(st.session_state.usuario)
-
-                    resposta = client.messages.create(
-                        model=MODEL_ID, max_tokens=4096, system=system_prompt,
-                        tools=TOOLS_VIAJAI, messages=mensagens_api,
-                    )
-                    # Limite de voltas de ferramenta (protecao contra loop
-                    # longo demais em pergunta com muito calculo/data
-                    # encadeado - achado 02/09: pergunta complexa de
-                    # previsao ficou sem resposta nenhuma, ver nota abaixo).
-                    _voltas_ferramenta = 0
-                    while resposta.stop_reason == "tool_use" and _voltas_ferramenta < 8:
-                        _voltas_ferramenta += 1
-                        tool_uses = [b for b in resposta.content if b.type == "tool_use"]
-                        resultados = []
-                        for tu in tool_uses:
-                            resultado = _executar_ferramenta_viajai(supabase, tu.name, tu.input)
-                            resultados.append(
-                                {"type": "tool_result", "tool_use_id": tu.id, "content": str(resultado)}
-                            )
-                            if tu.name in FERRAMENTAS_VISUAIS_VIAJAI:
-                                st.session_state.dash_extra_viajai = {
-                                    "tool": tu.name,
-                                    "input": tu.input,
-                                    "resultado": resultado,
-                                }
-                        mensagens_api.append({"role": "assistant", "content": resposta.content})
-                        mensagens_api.append({"role": "user", "content": resultados})
-                        resposta = client.messages.create(
-                            model=MODEL_ID, max_tokens=4096, system=system_prompt,
-                            tools=TOOLS_VIAJAI, messages=mensagens_api,
-                        )
-                    texto_final = "".join(b.text for b in resposta.content if b.type == "text")
-                    # Achado 02/09: pergunta com bastante calculo (varias
-                    # ferramentas + conta de data encadeada) as vezes cortava
-                    # a resposta sem nenhum texto (stop_reason vinha
-                    # "max_tokens" bem no meio de uma chamada de ferramenta,
-                    # o while acima nao pega isso porque so continua se
-                    # stop_reason == "tool_use") - bolha vazia no chat, sem
-                    # erro nenhum pra avisar o que houve. max_tokens subiu
-                    # de 1024 pra 4096 (reduz bastante a chance) e, se ainda
-                    # assim vier vazio, avisa em vez de ficar mudo.
-                    if not texto_final.strip():
-                        if resposta.stop_reason == "max_tokens":
-                            texto_final = (
-                                "A resposta ficou grande demais e foi cortada antes de terminar "
-                                "(pergunta com bastante calculo/etapa junto). Tenta perguntar em "
-                                "partes menores ou de um jeito mais direto."
-                            )
-                        elif _voltas_ferramenta >= 8:
-                            texto_final = (
-                                "Essa pergunta precisou de muitas consultas em sequencia e eu parei "
-                                "antes de concluir, pra não travar. Tenta quebrar em perguntas menores."
-                            )
-                        else:
-                            texto_final = "Não consegui gerar uma resposta pra essa pergunta — tenta reformular."
-                except Exception as e:
-                    texto_final = f"Erro ao consultar o assistente: {e}"
-
-            st.session_state.mensagens_chat.append({"role": "assistant", "content": texto_final})
-            supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "assistant", "p_conteudo": texto_final}).execute()
-            st.rerun()
+        # Container de altura fixa - pedido do Rafael 03/09: o campo de
+        # digitar ia descendo junto com a conversa em vez de ficar fixo
+        # embaixo. Achado (doc oficial do Streamlit, checado antes de
+        # mexer): st.chat_input SO fixa sozinho no rodape quando chamado
+        # no corpo principal da pagina - dentro de st.columns ele vira um
+        # campo comum, sem fixar. Por isso o chat_input foi movido pra
+        # fora das colunas (ve mais abaixo) e aqui a lista de mensagens
+        # ganhou altura fixa com rolagem propria, pra nao esticar a pagina.
+        historico_box = st.container(height=480)
+        with historico_box:
+            for m in st.session_state.mensagens_chat:
+                with st.chat_message(m["role"]):
+                    conteudo = m["content"] if isinstance(m["content"], str) else "(ferramenta)"
+                    st.markdown(_escapar_dolar(conteudo))
 
     with col_dash:
         acao = st.session_state.get("acao_pendente_viajai")
@@ -1442,6 +1375,96 @@ def pagina_chat(supabase):
                         st.map(df_mapa, latitude="latitude", longitude="longitude", size=15)
                     else:
                         st.caption("Nenhum canteiro com latitude/longitude cadastrada ainda.")
+
+    # chat_input FORA das colunas de proposito - so' assim o Streamlit fixa
+    # ele no rodape da pagina (achado 03/09, confirmado na doc oficial:
+    # dentro de st.columns ele nao fixa, vira widget comum). Fica largura
+    # cheia, embaixo dos 2 paineis.
+    pergunta = st.chat_input("Pergunte sobre folgas, urgência, custo...")
+
+    # Mesmo padrao 2 fases do TIA.go (evita bug de ordem visto la ja em
+    # producao): grava a pergunta e recarrega antes de chamar a API.
+    if pergunta:
+        st.session_state.mensagens_chat.append({"role": "user", "content": pergunta})
+        supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "user", "p_conteudo": pergunta}).execute()
+        st.rerun()
+
+    if st.session_state.mensagens_chat and st.session_state.mensagens_chat[-1]["role"] == "user":
+        with st.spinner("Consultando..."):
+            texto_final = None
+            try:
+                client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                mensagens_api = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.mensagens_chat
+                    if isinstance(m["content"], str)
+                ]
+                system_prompt = _montar_system_prompt_viajai(st.session_state.usuario)
+
+                resposta = client.messages.create(
+                    model=MODEL_ID, max_tokens=8192, system=system_prompt,
+                    tools=TOOLS_VIAJAI, messages=mensagens_api,
+                )
+                # Limite de voltas de ferramenta (protecao contra loop
+                # longo demais em pergunta com muito calculo/data
+                # encadeado - achado 02/09).
+                _voltas_ferramenta = 0
+                while resposta.stop_reason == "tool_use" and _voltas_ferramenta < 8:
+                    _voltas_ferramenta += 1
+                    tool_uses = [b for b in resposta.content if b.type == "tool_use"]
+                    resultados = []
+                    for tu in tool_uses:
+                        resultado = _executar_ferramenta_viajai(supabase, tu.name, tu.input)
+                        resultados.append(
+                            {"type": "tool_result", "tool_use_id": tu.id, "content": str(resultado)}
+                        )
+                        if tu.name in FERRAMENTAS_VISUAIS_VIAJAI:
+                            st.session_state.dash_extra_viajai = {
+                                "tool": tu.name,
+                                "input": tu.input,
+                                "resultado": resultado,
+                            }
+                    mensagens_api.append({"role": "assistant", "content": resposta.content})
+                    mensagens_api.append({"role": "user", "content": resultados})
+                    resposta = client.messages.create(
+                        model=MODEL_ID, max_tokens=8192, system=system_prompt,
+                        tools=TOOLS_VIAJAI, messages=mensagens_api,
+                    )
+                texto_final = "".join(b.text for b in resposta.content if b.type == "text")
+                # Achado 02/09 + 03/09: pergunta com bastante calculo as
+                # vezes corta a resposta no meio (stop_reason "max_tokens"),
+                # e isso pode acontecer com OU sem texto ja escrito ate ali
+                # (achado 03/09: um nome saiu cortado no meio da palavra,
+                # sem aviso nenhum, porque so' tratava o caso 100% vazio).
+                # max_tokens subiu de 4096 pra 8192 e agora qualquer corte
+                # por tamanho fica marcado, mesmo com texto parcial.
+                if resposta.stop_reason == "max_tokens":
+                    if texto_final.strip():
+                        texto_final = (
+                            texto_final.rstrip()
+                            + "\n\n⚠️ *(resposta cortada aqui — pergunta grande demais; "
+                            "pergunta em partes menores pra ver o resto)*"
+                        )
+                    else:
+                        texto_final = (
+                            "A resposta ficou grande demais e foi cortada antes de começar a "
+                            "escrever (pergunta com bastante cálculo/etapa junto). Tenta "
+                            "perguntar em partes menores ou de um jeito mais direto."
+                        )
+                elif not texto_final.strip():
+                    if _voltas_ferramenta >= 8:
+                        texto_final = (
+                            "Essa pergunta precisou de muitas consultas em sequencia e eu parei "
+                            "antes de concluir, pra não travar. Tenta quebrar em perguntas menores."
+                        )
+                    else:
+                        texto_final = "Não consegui gerar uma resposta pra essa pergunta — tenta reformular."
+            except Exception as e:
+                texto_final = f"Erro ao consultar o assistente: {e}"
+
+        st.session_state.mensagens_chat.append({"role": "assistant", "content": texto_final})
+        supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "assistant", "p_conteudo": texto_final}).execute()
+        st.rerun()
 
 def main():
     if "sessao" not in st.session_state:
