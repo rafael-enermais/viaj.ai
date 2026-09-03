@@ -4,3 +4,4 @@ anthropic
 python-dotenv
 openpyxl==3.1.5
 pandas
+requests

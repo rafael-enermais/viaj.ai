@@ -1,4 +1,4 @@
-# Viaj.AI — v6.1 (bugfix: previsao de gasto por colaborador so devolvia ID, sem nome - chat nao conseguia dizer de quem era; RPC (schema_v0.18) agora devolve nome/canteiro/obra junto, merge da tela Previsao de folgas ajustado pra nao colidir com as colunas que ja tinha) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v7.0 (nova funcao: consultar_distancia_carro no chat + expansor 'Estimar por carro' na pagina de Custo/Passagens, usando Google Distance Matrix API - so' geografia real km/tempo, preco NUNCA vem da internet, so' do historico proprio; tambem: schema_v0.19 corrige calculo de previsao de gasto que tratava trechos separados do mesmo dia como amostras distintas, diluindo a media) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -26,6 +26,8 @@ import os
 import uuid
 from datetime import date, datetime
 
+import requests
+
 import anthropic
 import openpyxl
 import pandas as pd
@@ -38,6 +40,12 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# Google Maps (Directions/Distance Matrix) - chave obtida pelo Rafael em
+# 02/09, guardada sem uso ate agora (bloco "chat+Maps+Duffel" ficou em
+# standby quando o pivo pra "historico real" aconteceu). Retomado 03/09:
+# so a parte de CARRO (distancia/tempo, sem busca de preco - mesma regra
+# do projeto inteiro de nao inventar preco) - ver _consultar_distancia_carro.
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 # TODO (03/09): confirmado contra a doc oficial da Anthropic em 02/09/2026
 # que "claude-sonnet-5" e' o identificador de modelo atual - MAS confirma
@@ -112,6 +120,50 @@ def _resolver_iata(texto):
     if len(limpo) == 3 and limpo.isalpha():
         return limpo.upper()
     return _IATA_CIDADES.get(limpo.lower(), "")
+
+
+def _consultar_distancia_carro(origem, destino):
+    """Distancia/duracao de carro entre 2 pontos via Google Distance
+    Matrix API - chave ja obtida pelo Rafael, retomada 03/09 depois do
+    pivo pra "historico real" (ver 00-handoff). So' geografia (distancia
+    e tempo reais do Google), NUNCA preco - preco continua vindo so' do
+    historico proprio do Viaj.AI, mesma regra do projeto inteiro.
+    Devolve dict com distancia_km/duracao_min ou {"erro": ...}."""
+    if not GOOGLE_MAPS_API_KEY:
+        return {"erro": "Google Maps API key nao configurada (Secrets do Streamlit: GOOGLE_MAPS_API_KEY)"}
+    if not origem or not destino:
+        return {"erro": "faltou origem ou destino"}
+    try:
+        resp = requests.get(
+            "https://maps.googleapis.com/maps/api/distancematrix/json",
+            params={
+                "origins": origem,
+                "destinations": destino,
+                "units": "metric",
+                "language": "pt-BR",
+                "key": GOOGLE_MAPS_API_KEY,
+            },
+            timeout=10,
+        )
+        dado = resp.json()
+        if dado.get("status") != "OK":
+            return {"erro": f"Google Maps recusou a consulta ({dado.get('status')}): {dado.get('error_message', '')}"}
+        linha = dado.get("rows", [{}])[0]
+        elemento = linha.get("elements", [{}])[0]
+        if elemento.get("status") != "OK":
+            return {"erro": f"Nao encontrei rota de carro entre esses 2 pontos ({elemento.get('status')}) - confere os nomes."}
+        return {
+            "origem": dado.get("origin_addresses", [origem])[0],
+            "destino": dado.get("destination_addresses", [destino])[0],
+            "distancia_km": round(elemento["distance"]["value"] / 1000, 1),
+            "duracao_min": round(elemento["duration"]["value"] / 60),
+            "distancia_texto": elemento["distance"]["text"],
+            "duracao_texto": elemento["duration"]["text"],
+        }
+    except requests.exceptions.RequestException as e:
+        return {"erro": f"Falha de rede consultando o Google Maps: {e}"}
+    except Exception as e:
+        return {"erro": str(e)}
 
 
 def _botao_exportar_excel(df, nome_arquivo, label="Exportar Excel"):
@@ -765,6 +817,49 @@ def pagina_custo_passagens(supabase):
         else:
             st.caption("Preenche origem e destino (cidade ou código) pra habilitar o link.")
 
+    with st.expander("🚗 Estimar por carro (Google Maps)"):
+        if not GOOGLE_MAPS_API_KEY:
+            st.caption(
+                "Chave do Google Maps ainda não configurada (Secrets do Streamlit Cloud: "
+                "GOOGLE_MAPS_API_KEY) — essa parte não funciona sem ela."
+            )
+        else:
+            st.caption(
+                "Distância e tempo reais (Google Directions), sem depender de histórico "
+                "próprio — só pra carro. Preço NÃO vem da internet (mesma regra do "
+                "resto do app): você informa consumo e preço do combustível, o app só "
+                "faz a conta."
+            )
+            c1, c2 = st.columns(2)
+            origem_carro = c1.text_input("Origem", key="carro_origem")
+            destino_carro = c2.text_input("Destino", key="carro_destino")
+            if st.button("Calcular distância", key="btn_calcular_carro"):
+                if origem_carro and destino_carro:
+                    st.session_state.dist_carro_resultado = _consultar_distancia_carro(origem_carro, destino_carro)
+                else:
+                    st.info("Preenche origem e destino.")
+
+            _dist = st.session_state.get("dist_carro_resultado")
+            if _dist:
+                if _dist.get("erro"):
+                    st.error(_dist["erro"])
+                else:
+                    st.write(
+                        f"**{_dist['distancia_texto']}** — cerca de **{_dist['duracao_texto']}** de carro "
+                        f"({_dist['origem']} → {_dist['destino']})"
+                    )
+                    c3, c4 = st.columns(2)
+                    consumo = c3.number_input(
+                        "Consumo do veículo (km/l)", min_value=0.1, value=10.0, step=0.5, key="carro_consumo",
+                    )
+                    preco_combustivel = c4.number_input(
+                        "Preço do combustível (R$/l)", min_value=0.0, value=6.00, step=0.10, key="carro_preco",
+                    )
+                    if consumo:
+                        custo_estimado = (_dist["distancia_km"] / consumo) * preco_combustivel
+                        st.metric("Custo estimado (combustível, só ida)", f"R$ {custo_estimado:.2f}")
+                        st.caption("Não inclui pedágio, desgaste do veículo ou diária de motorista — só combustível.")
+
     aba_folga, aba_rapido = st.tabs(["Por folga", "Lançamento rápido"])
 
     with aba_folga:
@@ -1136,6 +1231,25 @@ TOOLS_VIAJAI = [
             "required": ["origem", "destino", "valor_total"],
         },
     },
+    {
+        "name": "consultar_distancia_carro",
+        "description": (
+            "Distancia e tempo REAIS de carro entre 2 pontos (Google Maps) - so' geografia, "
+            "NUNCA preco. Use quando o usuario perguntar km/tempo de carro entre 2 lugares "
+            "(ex.: 'quantos km de carro do canteiro X ate' Y'). O preco/custo estimado de "
+            "combustivel so' e' calculado na tela (usuario informa consumo e preco do "
+            "litro), essa ferramenta nao devolve preco nenhum - se o usuario quiser custo, "
+            "diga pra usar o expansor 'Estimar por carro' na pagina de Custo/Passagens."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origem": {"type": "string", "description": "Cidade/local de origem"},
+                "destino": {"type": "string", "description": "Cidade/local de destino"},
+            },
+            "required": ["origem", "destino"],
+        },
+    },
 ]
 
 
@@ -1191,6 +1305,11 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             r = supabase.rpc("viajai_listar_lancamentos_rapidos", {"p_limite": entrada.get("limite", 200)}).execute()
         elif nome == "consultar_localizacoes_canteiro":
             r = supabase.rpc("viajai_listar_localizacoes_canteiro").execute()
+        elif nome == "consultar_distancia_carro":
+            # nao passa pelo padrao supabase.rpc(...).execute() - chama a
+            # API do Google direto (funcao ja devolve o dict pronto, com
+            # "erro" quando da' errado) - so' geografia, nunca preco.
+            return _consultar_distancia_carro(entrada.get("origem", ""), entrada.get("destino", ""))
         elif nome == "propor_lancamento_rapido":
             # NUNCA grava aqui - so' monta a proposta pro usuario confirmar
             # na tela (col_dash em pagina_chat). O INSERT de verdade so'
@@ -1313,7 +1432,11 @@ def _montar_system_prompt_viajai(usuario_email):
         "- onde fica um canteiro / aeroporto mais proximo -> consultar_localizacoes_canteiro "
         "(nem todo canteiro tem cadastro ainda, avise se nao achar).\n"
         "- usuario disse que COMPROU passagem(ns) -> propor_lancamento_rapido (so' com "
-        "origem/destino/valor certos; nunca grava sozinho, so' propoe pro usuario confirmar)."
+        "origem/destino/valor certos; nunca grava sozinho, so' propoe pro usuario confirmar).\n"
+        "- quantos km / quanto tempo de carro entre 2 lugares -> consultar_distancia_carro "
+        "(Google Maps - devolve so' distancia/tempo REAIS, NUNCA preco/custo; se o usuario "
+        "quiser custo estimado de combustivel, explique que precisa usar o expansor 'Estimar "
+        "por carro' na pagina de Custo/Passagens, la' ele informa consumo e preco do litro)."
     )
 
 
