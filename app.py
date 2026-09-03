@@ -1,4 +1,4 @@
-# Viaj.AI — v10.1 (fix: quadro 'Analise do assistente' mostrava 2x a mesma ferramenta quando a IA errava e corrigia sozinha na mesma pergunta - ex.: tentou 'Maringa' por extenso, deu erro, tentou de novo com codigo 'MGF' e acertou - as 2 tentativas apareciam juntas, confundindo o usuario. dash_multi_viajai agora e' filtrado antes de virar analise: erro da MESMA ferramenta que a propria IA corrigiu na mesma pergunta sai da lista, sem apagar 2 chamadas de ferramentas DIFERENTES que deram certo - ver _filtrar_dash_multi_viajai) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v11.0 (chat ganha 2a acao de escrita: propor_atualizar_folga - pedido aberto do Rafael 03/09 'pode implementar as proximas evolucoes que vc comentou' + backlog do handoff 'confirmar folga via chat'. MESMO padrao de seguranca do propor_lancamento_rapido: a IA NUNCA grava, so' resolve qual folga 'prevista' bate com o nome dito e monta proposta pro painel lateral - reusa 100% a RPC viajai_atualizar_folga que ja existia pra tela 'Confirmar folgas', zero schema novo) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -57,7 +57,7 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v10.1"
+VERSAO_APP = "v11.0"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -1571,6 +1571,47 @@ TOOLS_VIAJAI = [
             "required": ["origem", "destino"],
         },
     },
+    {
+        "name": "propor_atualizar_folga",
+        "description": (
+            "Propoe atualizar o status de UMA folga especifica (confirmar saida/retorno, marcar "
+            "vendida, cancelada etc) - MESMA logica da tela 'Confirmar folgas', so' que pelo chat. "
+            "NUNCA grava sozinho, so' resolve qual folga 'prevista' bate com o nome dito e monta a "
+            "proposta pro usuario confirmar no painel (igual propor_lancamento_rapido). Use quando o "
+            "usuario disser algo tipo 'confirma que o Fulano saiu ontem', 'marca a folga do Ciclano "
+            "como vendida', 'o Fulano ja voltou, retornou dia X'. So' funciona pra folga que ainda "
+            "esta 'prevista' (aguardando confirmacao) - se a ferramenta devolver erro (nome nao achado "
+            "ou mais de 1 folga prevista pra esse nome), oriente o usuario a usar a tela 'Confirmar "
+            "folgas' direto pra escolher a linha certa."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "colaborador_nome": {
+                    "type": "string",
+                    "description": "Nome do colaborador, como o usuario disse.",
+                },
+                "status_novo": {
+                    "type": "string",
+                    "enum": ["confirmada", "em_andamento", "realizada", "vendida", "cancelada"],
+                    "description": "Novo status da folga - nunca 'prevista' (isso seria nao mudar nada).",
+                },
+                "data_saida_real": {
+                    "type": "string",
+                    "description": "Data de saida real, formato AAAA-MM-DD, so' se o usuario disse. Deixe vazio se nao.",
+                },
+                "data_retorno_real": {
+                    "type": "string",
+                    "description": "Data de retorno real, formato AAAA-MM-DD, so' se o usuario disse. Deixe vazio se nao.",
+                },
+                "motivo_venda": {
+                    "type": "string",
+                    "description": "So' preencha se status_novo='vendida' e o usuario disse o motivo.",
+                },
+            },
+            "required": ["colaborador_nome", "status_novo"],
+        },
+    },
 ]
 
 
@@ -1686,6 +1727,61 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
                 ) + aviso_colaborador,
                 "resumo": resumo,
             }
+        elif nome == "propor_atualizar_folga":
+            # MESMA regra de seguranca: NUNCA grava aqui. So' resolve QUAL
+            # folga (tem que achar exatamente 1 'prevista' com o nome dito -
+            # 0 ou mais de 1 e' erro, pra nao arriscar atualizar a pessoa
+            # errada) e monta a proposta - quem executa de verdade e' o
+            # clique humano no painel, chamando viajai_atualizar_folga
+            # direto (MESMA RPC ja usada pela tela "Confirmar folgas",
+            # nenhum schema novo precisou ser escrito pra isso).
+            colaborador_nome_dito = (entrada.get("colaborador_nome") or "").strip()
+            status_novo = (entrada.get("status_novo") or "").strip()
+            if not colaborador_nome_dito or not status_novo:
+                return {"erro": "faltou colaborador_nome ou status_novo"}
+            if status_novo not in ("confirmada", "em_andamento", "realizada", "vendida", "cancelada"):
+                return {"erro": f"status_novo invalido: '{status_novo}'"}
+            r_prev = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 300}).execute()
+            candidatos = [
+                fl for fl in (r_prev.data or [])
+                if colaborador_nome_dito.lower() in (fl.get("nome") or "").lower()
+            ]
+            if len(candidatos) == 0:
+                return {
+                    "erro": (
+                        f"Nao achei nenhuma folga 'prevista' em aberto pra '{colaborador_nome_dito}' - "
+                        "confere o nome ou oriente a usar a tela 'Confirmar folgas' direto."
+                    )
+                }
+            if len(candidatos) > 1:
+                return {
+                    "erro": (
+                        f"Achei {len(candidatos)} folgas 'prevista' pra '{colaborador_nome_dito}' - "
+                        "nome ambiguo, preciso de um nome mais especifico ou oriente a usar a tela "
+                        "'Confirmar folgas' direto pra escolher a linha certa."
+                    )
+                }
+            folga_alvo = candidatos[0]
+            if "propostas_pendentes_viajai" not in st.session_state:
+                st.session_state.propostas_pendentes_viajai = []
+            st.session_state.propostas_pendentes_viajai.append({
+                "id": uuid.uuid4().hex[:8],
+                "tipo": "atualizar_folga",
+                "folga_id": folga_alvo["folga_id"],
+                "colaborador_nome": folga_alvo.get("nome"),
+                "status_novo": status_novo,
+                "data_saida_real": entrada.get("data_saida_real") or None,
+                "data_retorno_real": entrada.get("data_retorno_real") or None,
+                "motivo_venda": entrada.get("motivo_venda") or None,
+            })
+            total_pendentes = len(st.session_state.propostas_pendentes_viajai)
+            return {
+                "status": (
+                    f"proposta de atualizacao de folga adicionada ao painel lateral (agora sao "
+                    f"{total_pendentes} pendente(s) aguardando confirmacao, nada foi gravado ainda)"
+                ),
+                "resumo": f"{folga_alvo.get('nome')}: prevista -> {status_novo}",
+            }
         else:
             return {"erro": "ferramenta desconhecida"}
         return r.data if r.data else []
@@ -1746,9 +1842,11 @@ def _montar_system_prompt_viajai(usuario_email):
         "estiver claro quanto cada trecho custou, pergunte o valor de cada um antes de "
         "propor — nunca reparta um valor total automaticamente (dividir errado seria "
         "inventar numero).\n\n"
-        "Fora essa proposta, voce ainda so' CONSULTA — outras acoes (confirmar folga, "
-        "registrar trecho/gasto de uma folga especifica) nao tem ferramenta ainda, oriente "
-        "a usar a tela correspondente.\n\n"
+        "Voce tambem pode PROPOR atualizar o status de uma folga (confirmar saida/retorno, "
+        "vendida, cancelada) via propor_atualizar_folga - MESMA regra: nunca grava sozinho, so' "
+        "propoe pro usuario confirmar no painel. Fora essas 2 propostas, voce ainda so' CONSULTA "
+        "— outra acao (registrar trecho/gasto de uma folga especifica) nao tem ferramenta ainda, "
+        "oriente a usar a tela correspondente.\n\n"
         "Guia de qual ferramenta usar:\n"
         "- quem esta de folga / precisa viajar / urgencia -> consultar_previsao_folgas.\n"
         "- pendencia de import / nao bateu no RH -> consultar_pendencias_import.\n"
@@ -1775,11 +1873,17 @@ def _montar_system_prompt_viajai(usuario_email):
         "por carro' na pagina de Custo/Passagens, la' ele informa consumo e preco do litro).\n"
         "- usuario pede pra buscar/cotar passagem/voo -> consultar_link_skyscanner (devolve "
         "so' um link pronto pro site real deles, NUNCA um preco - se der erro de origem/"
-        "destino nao reconhecido, peca o codigo do aeroporto direto)."
+        "destino nao reconhecido, peca o codigo do aeroporto direto).\n"
+        "- usuario disse que uma folga MUDOU (confirmou saida/retorno, vendeu, cancelou) -> "
+        "propor_atualizar_folga (so' propoe, nunca grava sozinho; se der erro de nome nao "
+        "achado ou ambiguo, oriente a usar a tela 'Confirmar folgas' direto)."
     )
 
 
-FERRAMENTAS_VISUAIS_VIAJAI = {tool["name"] for tool in TOOLS_VIAJAI if tool["name"] != "propor_lancamento_rapido"}
+FERRAMENTAS_VISUAIS_VIAJAI = {
+    tool["name"] for tool in TOOLS_VIAJAI
+    if tool["name"] not in ("propor_lancamento_rapido", "propor_atualizar_folga")
+}
 # Toda ferramenta de consulta pode virar tabela no painel lateral do chat;
 # a de localizacao de canteiro tambem tenta virar mapa (se tiver lat/lon
 # cadastrada) — pedido do Rafael 02/09: "gerar um dash interativo ao lado,
@@ -1871,20 +1975,26 @@ def pagina_chat(supabase):
         # cada proposta com id proprio - confirma/cancela 1 por 1, ou em
         # lote com "Confirmar todas".
         propostas = st.session_state.get("propostas_pendentes_viajai", [])
+        # v11.0: 2 tipos de proposta agora (lancamento_rapido e atualizar_folga,
+        # ver propor_atualizar_folga) - separados aqui pra cada bloco renderizar
+        # so' o que sabe tratar; a lista guardada continua unica no session_state.
+        propostas_lanc = [p for p in propostas if p.get("tipo", "lancamento_rapido") == "lancamento_rapido"]
+        propostas_folga = [p for p in propostas if p.get("tipo") == "atualizar_folga"]
         if propostas:
             st.warning(
-                f"{len(propostas)} lançamento(s) aguardando confirmação — extraído da "
-                "conversa, revise cada um antes de gravar"
+                f"{len(propostas)} proposta(s) aguardando confirmação — extraído da "
+                "conversa, revise cada uma antes de gravar"
             )
+        if propostas_lanc:
             _colabs_resp = supabase.rpc("viajai_colaboradores_ativos").execute()
             _colabs_lista = _colabs_resp.data or []
             _colabs_opcoes = ["— Lote / sem definir —"] + [c["nome"] for c in _colabs_lista]
             _colabs_por_nome = {c["nome"]: c["colaborador_id"] for c in _colabs_lista}
 
-            if len(propostas) > 1:
+            if len(propostas_lanc) > 1:
                 col_all_ok, col_all_no = st.columns(2)
                 confirmar_todas = col_all_ok.button(
-                    f"✅ Confirmar todas ({len(propostas)})", use_container_width=True,
+                    f"✅ Confirmar todas ({len(propostas_lanc)})", use_container_width=True,
                     key="btn_confirmar_todas_propostas",
                 )
                 cancelar_todas = col_all_no.button(
@@ -1894,7 +2004,7 @@ def pagina_chat(supabase):
                     _registrados_agora = []
                     _ids_registrados = set()
                     _erros_lote = []
-                    for p in propostas:
+                    for p in propostas_lanc:
                         try:
                             _novo_id = supabase.rpc("viajai_registrar_lancamento_rapido", {
                                 "p_origem": p["origem"], "p_destino": p["destino"],
@@ -1930,14 +2040,19 @@ def pagina_chat(supabase):
                         st.session_state["_erros_lote_viajai"] = _erros_lote
                     st.rerun()
                 if cancelar_todas:
-                    st.session_state.propostas_pendentes_viajai = []
+                    # so cancela as de lancamento_rapido - folga pendente (se houver)
+                    # nao e' tocada por este botao, tem cancelar proprio no bloco dela.
+                    st.session_state.propostas_pendentes_viajai = [
+                        p for p in st.session_state.propostas_pendentes_viajai
+                        if p.get("tipo", "lancamento_rapido") != "lancamento_rapido"
+                    ]
                     st.rerun()
                 _erros_pendentes = st.session_state.pop("_erros_lote_viajai", None)
                 if _erros_pendentes:
                     st.error("Alguns não gravaram, ficaram pendentes pra revisar: " + "; ".join(_erros_pendentes))
                 st.divider()
 
-            for acao in list(propostas):
+            for acao in list(propostas_lanc):
                 _pid = acao["id"]
                 _titulo = (
                     f"{acao['quantidade']}x {acao['origem']} → {acao['destino']} — "
@@ -1945,7 +2060,7 @@ def pagina_chat(supabase):
                 )
                 if acao.get("colaborador_nome"):
                     _titulo += f" — {acao['colaborador_nome']}"
-                with st.expander(_titulo, expanded=(len(propostas) == 1)):
+                with st.expander(_titulo, expanded=(len(propostas_lanc) == 1)):
                     _indice_colab_default = 0
                     if acao.get("colaborador_nome") and acao["colaborador_nome"] in _colabs_opcoes:
                         _indice_colab_default = _colabs_opcoes.index(acao["colaborador_nome"])
@@ -2009,6 +2124,93 @@ def pagina_chat(supabase):
                         }).execute()
                         st.rerun()
                     elif cancelar:
+                        st.session_state.propostas_pendentes_viajai = [
+                            p for p in st.session_state.propostas_pendentes_viajai if p["id"] != _pid
+                        ]
+                        st.rerun()
+
+        if propostas_folga:
+            # v11.0 (propor_atualizar_folga): mesmo padrao de expander +
+            # form individual do lancamento rapido, mas so' confirmacao
+            # 1 a 1 (sem "confirmar todas" em lote aqui de proposito -
+            # atualizar status de folga e' 1 pessoa por vez, sem o cenario
+            # de "comprei 10 passagens" que justificou o lote no outro
+            # tipo). Confirmar chama a MESMA RPC viajai_atualizar_folga
+            # que a tela "Confirmar folgas" ja usa.
+            for acao in list(propostas_folga):
+                _pid = acao["id"]
+                _titulo = f"Folga: {acao.get('colaborador_nome') or '?'} → {acao['status_novo']}"
+                with st.expander(_titulo, expanded=(len(propostas_folga) == 1)):
+                    with st.form(f"form_confirmar_folga_ia_{_pid}"):
+                        c_status = st.selectbox(
+                            "Status novo", _STATUS_OPCOES,
+                            index=(
+                                _STATUS_OPCOES.index(acao["status_novo"])
+                                if acao["status_novo"] in _STATUS_OPCOES else 1
+                            ),
+                            key=f"status_folga_{_pid}",
+                        )
+                        c_tem_saida = st.checkbox(
+                            "Informar data de saída real", value=bool(acao.get("data_saida_real")),
+                            key=f"tem_saida_folga_{_pid}",
+                        )
+                        c_saida = None
+                        if c_tem_saida:
+                            try:
+                                _saida_default = (
+                                    date.fromisoformat(acao["data_saida_real"])
+                                    if acao.get("data_saida_real") else date.today()
+                                )
+                            except (ValueError, TypeError):
+                                _saida_default = date.today()
+                            c_saida = st.date_input("Saída real", value=_saida_default, key=f"saida_folga_{_pid}")
+                        c_tem_retorno = st.checkbox(
+                            "Informar data de retorno real", value=bool(acao.get("data_retorno_real")),
+                            key=f"tem_retorno_folga_{_pid}",
+                        )
+                        c_retorno = None
+                        if c_tem_retorno:
+                            try:
+                                _retorno_default = (
+                                    date.fromisoformat(acao["data_retorno_real"])
+                                    if acao.get("data_retorno_real") else date.today()
+                                )
+                            except (ValueError, TypeError):
+                                _retorno_default = date.today()
+                            c_retorno = st.date_input(
+                                "Retorno real", value=_retorno_default, key=f"retorno_folga_{_pid}"
+                            )
+                        c_motivo = st.text_input(
+                            "Motivo (se vendida)", value=acao.get("motivo_venda") or "",
+                            key=f"motivo_folga_{_pid}",
+                        )
+                        col_ok, col_no = st.columns(2)
+                        confirmar_folga = col_ok.form_submit_button(
+                            "✅ Confirmar e atualizar", use_container_width=True
+                        )
+                        cancelar_folga = col_no.form_submit_button("Cancelar", use_container_width=True)
+
+                    if confirmar_folga:
+                        supabase.rpc("viajai_atualizar_folga", {
+                            "p_folga_id": int(acao["folga_id"]),
+                            "p_status": c_status,
+                            "p_data_saida_real": c_saida.isoformat() if c_saida else None,
+                            "p_data_retorno_real": c_retorno.isoformat() if c_retorno else None,
+                            "p_motivo_venda": c_motivo or None,
+                        }).execute()
+                        st.session_state.propostas_pendentes_viajai = [
+                            p for p in st.session_state.propostas_pendentes_viajai if p["id"] != _pid
+                        ]
+                        _resumo_folga_txt = f"{acao.get('colaborador_nome') or '?'}: folga atualizada para {c_status}."
+                        st.session_state.mensagens_chat.append({
+                            "role": "assistant", "content": _resumo_folga_txt,
+                        })
+                        supabase.rpc("viajai_salvar_mensagem_chat", {
+                            "p_papel": "assistant", "p_conteudo": _resumo_folga_txt,
+                        }).execute()
+                        st.success(_resumo_folga_txt)
+                        st.rerun()
+                    elif cancelar_folga:
                         st.session_state.propostas_pendentes_viajai = [
                             p for p in st.session_state.propostas_pendentes_viajai if p["id"] != _pid
                         ]
