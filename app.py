@@ -1,4 +1,4 @@
-# Viaj.AI — v5.3 (ajuste visual: bloco do chat esticado pra 900px, pedido direto do Rafael) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v6.0 (bugfix: lancamento rapido via chat agora suporta VARIAS propostas pendentes ao mesmo tempo - antes cada nova proposta sobrescrevia a anterior no session_state e so a ultima sobrevivia; painel ganhou confirmar/cancelar individual + em lote) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -23,6 +23,7 @@
 import base64
 import io
 import os
+import uuid
 from datetime import date, datetime
 
 import anthropic
@@ -1198,7 +1199,10 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             colaborador_id_resolvido, colaborador_nome_resolvido = _resolver_colaborador_por_nome(
                 supabase, colaborador_nome_dito
             )
-            st.session_state.acao_pendente_viajai = {
+            if "propostas_pendentes_viajai" not in st.session_state:
+                st.session_state.propostas_pendentes_viajai = []
+            st.session_state.propostas_pendentes_viajai.append({
+                "id": uuid.uuid4().hex[:8],
                 "tipo": "lancamento_rapido",
                 "origem": origem,
                 "destino": destino,
@@ -1209,7 +1213,7 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
                 "observacao": entrada.get("observacao") or "",
                 "colaborador_id": colaborador_id_resolvido,
                 "colaborador_nome": colaborador_nome_resolvido,
-            }
+            })
             resumo = f"{entrada.get('quantidade') or 1}x {origem} -> {destino}, R$ {float(valor_total):.2f}"
             aviso_colaborador = ""
             if colaborador_nome_dito and not colaborador_id_resolvido:
@@ -1219,8 +1223,12 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
                 )
             elif colaborador_nome_resolvido:
                 resumo += f" — {colaborador_nome_resolvido}"
+            total_pendentes = len(st.session_state.propostas_pendentes_viajai)
             return {
-                "status": "proposta pronta, aguardando o usuario confirmar no painel lateral (nao foi gravado ainda)" + aviso_colaborador,
+                "status": (
+                    f"proposta adicionada ao painel lateral (agora sao {total_pendentes} "
+                    "pendente(s) aguardando confirmacao, nenhuma foi gravada ainda)"
+                ) + aviso_colaborador,
                 "resumo": resumo,
             }
         else:
@@ -1262,9 +1270,23 @@ def _montar_system_prompt_viajai(usuario_email):
         "'comprei 10 passagens do Ceara pra SP'), NAO pergunte de quem e' - isso e' normal e "
         "fica sem colaborador definido, a pessoa pode atribuir depois na tela. So' pergunte "
         "'e' pra alguem especifico ou lote sem definir ainda?' quando a frase ficar realmente "
-        "ambigua sobre isso. Fora essa proposta, voce ainda so' CONSULTA — outras acoes "
-        "(confirmar folga, registrar trecho/gasto de uma folga especifica) nao tem ferramenta "
-        "ainda, oriente a usar a tela correspondente.\n\n"
+        "ambigua sobre isso.\n\n"
+        "Se o usuario descrever VARIAS compras numa mensagem so' (ex.: varios "
+        "colaboradores, varios trechos de uma mesma viagem, ou uma lista de lancamentos "
+        "diferentes), chame propor_lancamento_rapido UMA VEZ PRA CADA lancamento "
+        "separado (1 pessoa + 1 trecho = 1 chamada) — cada chamada vira uma proposta "
+        "INDEPENDENTE no painel lateral, empilhada junto com as outras, nunca substitui a "
+        "anterior. Quando terminar de propor todas, informe corretamente quantas ficaram "
+        "pendentes (o campo 'status' de cada chamada já te diz o total acumulado até "
+        "aquele momento) e diga que da' pra confirmar uma por uma OU todas de uma vez com "
+        "o botao 'Confirmar todas' que aparece quando ha' mais de 1 pendente. Se o usuario "
+        "der um valor TOTAL (ex.: 'gastei 6mil no total, dividido em 3 trechos') e nao "
+        "estiver claro quanto cada trecho custou, pergunte o valor de cada um antes de "
+        "propor — nunca reparta um valor total automaticamente (dividir errado seria "
+        "inventar numero).\n\n"
+        "Fora essa proposta, voce ainda so' CONSULTA — outras acoes (confirmar folga, "
+        "registrar trecho/gasto de uma folga especifica) nao tem ferramenta ainda, oriente "
+        "a usar a tela correspondente.\n\n"
         "Guia de qual ferramenta usar:\n"
         "- quem esta de folga / precisa viajar / urgencia -> consultar_previsao_folgas.\n"
         "- pendencia de import / nao bateu no RH -> consultar_pendencias_import.\n"
@@ -1339,97 +1361,180 @@ def pagina_chat(supabase):
                     st.markdown(_escapar_dolar(conteudo))
 
     with col_dash:
-        acao = st.session_state.get("acao_pendente_viajai")
-        if acao and acao.get("tipo") == "lancamento_rapido":
-            # Confirmacao humana antes de gravar - pedido do Rafael 03/09:
-            # a IA so' PROPOE (ferramenta propor_lancamento_rapido nunca
-            # grava), quem executa de verdade e' sempre a pessoa clicando
-            # aqui. Campos vem preenchidos com o que a IA extraiu, mas dao
-            # pra corrigir antes de confirmar - camada extra de seguranca.
-            st.warning("Confirme antes de gravar — extraído da conversa, revise se estiver errado")
-            # Colaborador - pedido do Rafael 03/09: "teria q direcionar pra
-            # quem ficara esse custo primeiro antes de pensar em gravar".
-            # A IA tenta resolver pelo nome citado (propor_lancamento_rapido
-            # -> _resolver_colaborador_por_nome), mas o campo aqui e' sempre
-            # editavel - rede de seguranca pra quando nao achou ou achou
-            # nome ambiguo. Fica opcional (lote sem pessoa definida continua
-            # valido, schema_v0.17).
+        # BUG CORRIGIDO 03/09 (achado pelo Rafael testando compra
+        # multi-pessoa/multi-trecho, "so' gravou 1?"): acao_pendente_viajai
+        # era um dict UNICO no session_state - quando a IA chamava
+        # propor_lancamento_rapido varias vezes na mesma resposta (1 por
+        # pessoa/trecho), cada chamada SOBRESCREVIA a anterior, so' a
+        # ultima sobrevivia ate a tela, mesmo a IA descrevendo em texto
+        # "9 propostas prontas". Virou lista (propostas_pendentes_viajai),
+        # cada proposta com id proprio - confirma/cancela 1 por 1, ou em
+        # lote com "Confirmar todas".
+        propostas = st.session_state.get("propostas_pendentes_viajai", [])
+        if propostas:
+            st.warning(
+                f"{len(propostas)} lançamento(s) aguardando confirmação — extraído da "
+                "conversa, revise cada um antes de gravar"
+            )
             _colabs_resp = supabase.rpc("viajai_colaboradores_ativos").execute()
             _colabs_lista = _colabs_resp.data or []
             _colabs_opcoes = ["— Lote / sem definir —"] + [c["nome"] for c in _colabs_lista]
             _colabs_por_nome = {c["nome"]: c["colaborador_id"] for c in _colabs_lista}
-            _indice_colab_default = 0
-            if acao.get("colaborador_nome") and acao["colaborador_nome"] in _colabs_opcoes:
-                _indice_colab_default = _colabs_opcoes.index(acao["colaborador_nome"])
-            with st.form("form_confirmar_lancamento_ia"):
-                c_origem = st.text_input("Origem", value=acao["origem"])
-                c_destino = st.text_input("Destino", value=acao["destino"])
-                c_valor = st.number_input("Valor total (R$)", value=float(acao["valor_total"]), min_value=0.0, step=0.01)
-                c_qtd = st.number_input("Quantidade", value=int(acao["quantidade"]), min_value=1, step=1)
-                c_modal = st.selectbox(
-                    "Modal", ["aviao", "onibus", "carro", "taxi", "outro"],
-                    index=["aviao", "onibus", "carro", "taxi", "outro"].index(acao["modal"]) if acao["modal"] in ["aviao", "onibus", "carro", "taxi", "outro"] else 0,
+
+            if len(propostas) > 1:
+                col_all_ok, col_all_no = st.columns(2)
+                confirmar_todas = col_all_ok.button(
+                    f"✅ Confirmar todas ({len(propostas)})", use_container_width=True,
+                    key="btn_confirmar_todas_propostas",
                 )
-                try:
-                    _data_default = date.fromisoformat(acao["data"])
-                except (ValueError, TypeError):
-                    _data_default = date.today()
-                c_data = st.date_input("Data", value=_data_default)
-                c_obs = st.text_input("Observação", value=acao.get("observacao", ""))
-                c_colab = st.selectbox("Colaborador (opcional)", _colabs_opcoes, index=_indice_colab_default)
-                col_ok, col_no = st.columns(2)
-                confirmar = col_ok.form_submit_button("✅ Confirmar e registrar", use_container_width=True)
-                cancelar = col_no.form_submit_button("Cancelar", use_container_width=True)
-
-            if confirmar:
-                _colab_id_confirmar = _colabs_por_nome.get(c_colab)
-                _novo_id = supabase.rpc("viajai_registrar_lancamento_rapido", {
-                    "p_origem": c_origem, "p_destino": c_destino, "p_valor_total": c_valor,
-                    "p_quantidade": int(c_qtd), "p_modal": c_modal,
-                    "p_data": c_data.isoformat(), "p_observacao": c_obs or None,
-                    "p_colaborador_id": _colab_id_confirmar,
-                }).execute().data
-                del st.session_state.acao_pendente_viajai
-                _resumo_txt = f"{int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}"
-                if _colab_id_confirmar:
-                    _resumo_txt += f" — {c_colab}"
-                # Guarda o id pra oferecer "Desfazer" na hora - pedido do
-                # Rafael 03/09 (testar e conseguir apagar/desfazer facil,
-                # sem precisar de SQL Editor). schema_v0.16 precisa estar
-                # rodado (viajai_apagar_lancamento_rapido) - se nao estiver,
-                # o botao "Desfazer" abaixo vai dar erro claro na hora.
-                st.session_state.ultimo_lancamento_viajai = {
-                    "id": _novo_id,
-                    "resumo": _resumo_txt,
-                }
-                st.session_state.mensagens_chat.append({
-                    "role": "assistant",
-                    "content": f"Registrado: {_resumo_txt}.",
-                })
-                supabase.rpc("viajai_salvar_mensagem_chat", {
-                    "p_papel": "assistant",
-                    "p_conteudo": f"Registrado: {_resumo_txt}.",
-                }).execute()
-                st.rerun()
-            elif cancelar:
-                del st.session_state.acao_pendente_viajai
-                st.rerun()
-
-        _ultimo = st.session_state.get("ultimo_lancamento_viajai")
-        if _ultimo:
-            st.success(f"Registrado: {_ultimo['resumo']}")
-            if st.button("↩️ Desfazer esse registro", key="btn_desfazer_ultimo_lancamento"):
-                try:
-                    supabase.rpc("viajai_apagar_lancamento_rapido", {"p_id": _ultimo["id"]}).execute()
-                    del st.session_state.ultimo_lancamento_viajai
-                    st.success("Desfeito.")
+                cancelar_todas = col_all_no.button(
+                    "Cancelar todas", use_container_width=True, key="btn_cancelar_todas_propostas",
+                )
+                if confirmar_todas:
+                    _registrados_agora = []
+                    _ids_registrados = set()
+                    _erros_lote = []
+                    for p in propostas:
+                        try:
+                            _novo_id = supabase.rpc("viajai_registrar_lancamento_rapido", {
+                                "p_origem": p["origem"], "p_destino": p["destino"],
+                                "p_valor_total": p["valor_total"], "p_quantidade": p["quantidade"],
+                                "p_modal": p["modal"], "p_data": p["data"],
+                                "p_observacao": p.get("observacao") or None,
+                                "p_colaborador_id": p.get("colaborador_id"),
+                            }).execute().data
+                            _resumo_txt = f"{p['quantidade']}x {p['origem']} -> {p['destino']}, R$ {p['valor_total']:.2f}"
+                            if p.get("colaborador_nome"):
+                                _resumo_txt += f" — {p['colaborador_nome']}"
+                            _registrados_agora.append({"id": _novo_id, "resumo": _resumo_txt})
+                            _ids_registrados.add(p["id"])
+                        except Exception as e:
+                            _erros_lote.append(f"{p['origem']} -> {p['destino']}: {e}")
+                    st.session_state.registros_recentes_viajai = (
+                        _registrados_agora + st.session_state.get("registros_recentes_viajai", [])
+                    )
+                    # so' fica pendente quem deu erro - o que gravou sai da
+                    # lista pelo id (nao por texto, pra nao arriscar casar
+                    # errado com origem/valor repetido entre propostas).
+                    st.session_state.propostas_pendentes_viajai = [
+                        p for p in propostas if p["id"] not in _ids_registrados
+                    ]
+                    if _registrados_agora:
+                        _resumo_msg = "; ".join(r["resumo"] for r in _registrados_agora)
+                        _texto_lote = f"Registrados {len(_registrados_agora)} lançamento(s): {_resumo_msg}."
+                        st.session_state.mensagens_chat.append({"role": "assistant", "content": _texto_lote})
+                        supabase.rpc("viajai_salvar_mensagem_chat", {
+                            "p_papel": "assistant", "p_conteudo": _texto_lote,
+                        }).execute()
+                    if _erros_lote:
+                        st.session_state["_erros_lote_viajai"] = _erros_lote
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Não consegui desfazer (rodou o schema_v0.16 no Supabase?): {e}")
-            if st.button("Ok, manter", key="btn_manter_ultimo_lancamento"):
-                del st.session_state.ultimo_lancamento_viajai
-                st.rerun()
-        if acao or _ultimo:
+                if cancelar_todas:
+                    st.session_state.propostas_pendentes_viajai = []
+                    st.rerun()
+                _erros_pendentes = st.session_state.pop("_erros_lote_viajai", None)
+                if _erros_pendentes:
+                    st.error("Alguns não gravaram, ficaram pendentes pra revisar: " + "; ".join(_erros_pendentes))
+                st.divider()
+
+            for acao in list(propostas):
+                _pid = acao["id"]
+                _titulo = (
+                    f"{acao['quantidade']}x {acao['origem']} → {acao['destino']} — "
+                    f"R$ {acao['valor_total']:.2f}"
+                )
+                if acao.get("colaborador_nome"):
+                    _titulo += f" — {acao['colaborador_nome']}"
+                with st.expander(_titulo, expanded=(len(propostas) == 1)):
+                    _indice_colab_default = 0
+                    if acao.get("colaborador_nome") and acao["colaborador_nome"] in _colabs_opcoes:
+                        _indice_colab_default = _colabs_opcoes.index(acao["colaborador_nome"])
+                    with st.form(f"form_confirmar_lancamento_ia_{_pid}"):
+                        c_origem = st.text_input("Origem", value=acao["origem"], key=f"origem_{_pid}")
+                        c_destino = st.text_input("Destino", value=acao["destino"], key=f"destino_{_pid}")
+                        c_valor = st.number_input(
+                            "Valor total (R$)", value=float(acao["valor_total"]), min_value=0.0,
+                            step=0.01, key=f"valor_{_pid}",
+                        )
+                        c_qtd = st.number_input(
+                            "Quantidade", value=int(acao["quantidade"]), min_value=1, step=1, key=f"qtd_{_pid}",
+                        )
+                        c_modal = st.selectbox(
+                            "Modal", ["aviao", "onibus", "carro", "taxi", "outro"],
+                            index=["aviao", "onibus", "carro", "taxi", "outro"].index(acao["modal"]) if acao["modal"] in ["aviao", "onibus", "carro", "taxi", "outro"] else 0,
+                            key=f"modal_{_pid}",
+                        )
+                        try:
+                            _data_default = date.fromisoformat(acao["data"])
+                        except (ValueError, TypeError):
+                            _data_default = date.today()
+                        c_data = st.date_input("Data", value=_data_default, key=f"data_{_pid}")
+                        c_obs = st.text_input("Observação", value=acao.get("observacao", ""), key=f"obs_{_pid}")
+                        c_colab = st.selectbox(
+                            "Colaborador (opcional)", _colabs_opcoes, index=_indice_colab_default, key=f"colab_{_pid}",
+                        )
+                        col_ok, col_no = st.columns(2)
+                        confirmar = col_ok.form_submit_button("✅ Confirmar e registrar", use_container_width=True)
+                        cancelar = col_no.form_submit_button("Cancelar", use_container_width=True)
+
+                    if confirmar:
+                        _colab_id_confirmar = _colabs_por_nome.get(c_colab)
+                        _novo_id = supabase.rpc("viajai_registrar_lancamento_rapido", {
+                            "p_origem": c_origem, "p_destino": c_destino, "p_valor_total": c_valor,
+                            "p_quantidade": int(c_qtd), "p_modal": c_modal,
+                            "p_data": c_data.isoformat(), "p_observacao": c_obs or None,
+                            "p_colaborador_id": _colab_id_confirmar,
+                        }).execute().data
+                        st.session_state.propostas_pendentes_viajai = [
+                            p for p in st.session_state.propostas_pendentes_viajai if p["id"] != _pid
+                        ]
+                        _resumo_txt = f"{int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}"
+                        if _colab_id_confirmar:
+                            _resumo_txt += f" — {c_colab}"
+                        # Guarda o id pra oferecer "Desfazer" na hora - pedido do
+                        # Rafael 03/09. schema_v0.16 precisa estar rodado
+                        # (viajai_apagar_lancamento_rapido) - se nao estiver,
+                        # o botao "Desfazer" abaixo vai dar erro claro na hora.
+                        st.session_state.registros_recentes_viajai = (
+                            [{"id": _novo_id, "resumo": _resumo_txt}]
+                            + st.session_state.get("registros_recentes_viajai", [])
+                        )
+                        st.session_state.mensagens_chat.append({
+                            "role": "assistant",
+                            "content": f"Registrado: {_resumo_txt}.",
+                        })
+                        supabase.rpc("viajai_salvar_mensagem_chat", {
+                            "p_papel": "assistant",
+                            "p_conteudo": f"Registrado: {_resumo_txt}.",
+                        }).execute()
+                        st.rerun()
+                    elif cancelar:
+                        st.session_state.propostas_pendentes_viajai = [
+                            p for p in st.session_state.propostas_pendentes_viajai if p["id"] != _pid
+                        ]
+                        st.rerun()
+
+        _registros = st.session_state.get("registros_recentes_viajai", [])
+        if _registros:
+            for _reg in list(_registros):
+                st.success(f"Registrado: {_reg['resumo']}")
+                col_undo, col_keep = st.columns(2)
+                if col_undo.button("↩️ Desfazer", key=f"btn_desfazer_{_reg['id']}", use_container_width=True):
+                    try:
+                        supabase.rpc("viajai_apagar_lancamento_rapido", {"p_id": _reg["id"]}).execute()
+                        st.session_state.registros_recentes_viajai = [
+                            r for r in st.session_state.registros_recentes_viajai if r["id"] != _reg["id"]
+                        ]
+                        st.success("Desfeito.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Não consegui desfazer (rodou o schema_v0.16 no Supabase?): {e}")
+                if col_keep.button("Ok, manter", key=f"btn_manter_{_reg['id']}", use_container_width=True):
+                    st.session_state.registros_recentes_viajai = [
+                        r for r in st.session_state.registros_recentes_viajai if r["id"] != _reg["id"]
+                    ]
+                    st.rerun()
+        if propostas or _registros:
             st.divider()
 
         st.caption("Painel — última consulta com dado")
