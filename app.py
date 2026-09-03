@@ -1,4 +1,4 @@
-# Viaj.AI — v9.0 (novo quadro 'Analise do assistente' embaixo do painel de atalho no chat - pedido do Rafael 03/09: quando uma pergunta em linguagem natural pede comparacao/analise que precisa de mais de 1 consulta pra montar, dash_multi_viajai agora acumula TODAS as consultas daquela pergunta (nao so a ultima) + o texto que a IA escreveu, e um botao 'Gerar relatorio desta analise' empacota tudo junto - narrativa da IA + todas as tabelas - num HTML so, pra nao perder raciocinio elaborado que a IA monta sem forma pre-definida) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v10.0 (chat ganha ferramenta consultar_link_skyscanner - pedido do Rafael 03/09 'o link de busca de preço do skyscanner, o chat consegue utilizar?': o botao 'Ver no Skyscanner' so existia manual na tela Custo & Passagens, agora o Assistente tambem monta o mesmo link oficial (deep-link documentado, sem API key, sem preco nenhum vindo da IA) quando o usuario pedir busca de passagem em conversa) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -57,7 +57,7 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v9.0"
+VERSAO_APP = "v10.0"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -145,6 +145,47 @@ def _resolver_iata(texto):
     return _IATA_CIDADES.get(limpo.lower(), "")
 
 
+def _link_skyscanner(origem_txt, destino_txt, data_ida_str):
+    """Monta o MESMO link oficial de busca do Skyscanner que ja existia
+    como botao manual na tela Custo & Passagens (deep-link documentado,
+    sem API key - developers.skyscanner.net/docs/referrals/examples) -
+    agora tambem disponivel pro Assistente montar em conversa. So' abre
+    a pagina real deles com o resultado ja filtrado (origem/destino/data);
+    NUNCA devolve preco aqui dentro - quem ve o preco real e' o proprio
+    site do Skyscanner quando a pessoa clica."""
+    origem_iata = _resolver_iata(origem_txt)
+    destino_iata = _resolver_iata(destino_txt)
+    if not origem_iata or not destino_iata:
+        faltando = []
+        if not origem_iata:
+            faltando.append(f"origem '{origem_txt}'")
+        if not destino_iata:
+            faltando.append(f"destino '{destino_txt}'")
+        return {
+            "erro": (
+                f"Nao reconheci {' e '.join(faltando)} - peca pro usuario o codigo "
+                "do aeroporto direto (ex.: FOR, GRU) ou o nome da cidade certinho."
+            )
+        }
+    try:
+        data_ida = (
+            datetime.strptime(data_ida_str, "%Y-%m-%d").date() if data_ida_str else date.today()
+        )
+    except ValueError:
+        data_ida = date.today()
+    url = (
+        "https://www.skyscanner.net/g/referrals/v1/flights/day-view/"
+        f"?origin={origem_iata}&destination={destino_iata}"
+        f"&outboundDate={data_ida.isoformat()}&market=BR&currency=BRL&locale=pt-BR"
+    )
+    return {
+        "origem": origem_iata,
+        "destino": destino_iata,
+        "data_ida": data_ida.isoformat(),
+        "link_skyscanner": url,
+    }
+
+
 def _consultar_distancia_carro(origem, destino):
     """Distancia/duracao de carro entre 2 pontos via Google Distance
     Matrix API - chave ja obtida pelo Rafael, retomada 03/09 depois do
@@ -218,6 +259,7 @@ TITULOS_RELATORIO_VIAJAI = {
     "consultar_lancamentos_rapidos": "Lançamentos rápidos recentes",
     "consultar_localizacoes_canteiro": "Localizações de canteiro",
     "consultar_distancia_carro": "Distância de carro (Google Maps)",
+    "consultar_link_skyscanner": "Link de busca (Skyscanner)",
 }
 
 # Atalhos de relatorio rapido (pedido do Rafael 03/09: "botaozinho que pede
@@ -1469,6 +1511,29 @@ TOOLS_VIAJAI = [
             "required": ["origem", "destino"],
         },
     },
+    {
+        "name": "consultar_link_skyscanner",
+        "description": (
+            "Monta um link pronto pra abrir a busca de passagem no Skyscanner (site real "
+            "deles, deep-link oficial, sem API key) - use quando o usuario pedir pra "
+            "'buscar passagem', 'ver preco de voo', 'cotar passagem' etc em conversa. "
+            "Aceita nome de cidade OU codigo IATA pra origem/destino. NUNCA devolve preco "
+            "nenhum - so' o link; quem ve o preco de verdade e' o proprio site quando a "
+            "pessoa clica. Se a data nao for informada, usa hoje."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origem": {"type": "string", "description": "Cidade ou codigo IATA de origem"},
+                "destino": {"type": "string", "description": "Cidade ou codigo IATA de destino"},
+                "data_ida": {
+                    "type": "string",
+                    "description": "Data de ida no formato AAAA-MM-DD. Deixe vazio se o usuario nao disse.",
+                },
+            },
+            "required": ["origem", "destino"],
+        },
+    },
 ]
 
 
@@ -1529,6 +1594,13 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             # API do Google direto (funcao ja devolve o dict pronto, com
             # "erro" quando da' errado) - so' geografia, nunca preco.
             return _consultar_distancia_carro(entrada.get("origem", ""), entrada.get("destino", ""))
+        elif nome == "consultar_link_skyscanner":
+            # tambem nao passa pelo supabase - so' monta URL local (mesma
+            # logica do botao manual na tela Custo & Passagens); nunca
+            # busca/mostra preco, so' devolve o link pronto.
+            return _link_skyscanner(
+                entrada.get("origem", ""), entrada.get("destino", ""), entrada.get("data_ida", "")
+            )
         elif nome == "propor_lancamento_rapido":
             # NUNCA grava aqui - so' monta a proposta pro usuario confirmar
             # na tela (col_dash em pagina_chat). O INSERT de verdade so'
@@ -1663,7 +1735,10 @@ def _montar_system_prompt_viajai(usuario_email):
         "- quantos km / quanto tempo de carro entre 2 lugares -> consultar_distancia_carro "
         "(Google Maps - devolve so' distancia/tempo REAIS, NUNCA preco/custo; se o usuario "
         "quiser custo estimado de combustivel, explique que precisa usar o expansor 'Estimar "
-        "por carro' na pagina de Custo/Passagens, la' ele informa consumo e preco do litro)."
+        "por carro' na pagina de Custo/Passagens, la' ele informa consumo e preco do litro).\n"
+        "- usuario pede pra buscar/cotar passagem/voo -> consultar_link_skyscanner (devolve "
+        "so' um link pronto pro site real deles, NUNCA um preco - se der erro de origem/"
+        "destino nao reconhecido, peca o codigo do aeroporto direto)."
     )
 
 
