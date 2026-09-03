@@ -1,4 +1,4 @@
-# Viaj.AI — v11.0 (chat ganha 2a acao de escrita: propor_atualizar_folga - pedido aberto do Rafael 03/09 'pode implementar as proximas evolucoes que vc comentou' + backlog do handoff 'confirmar folga via chat'. MESMO padrao de seguranca do propor_lancamento_rapido: a IA NUNCA grava, so' resolve qual folga 'prevista' bate com o nome dito e monta proposta pro painel lateral - reusa 100% a RPC viajai_atualizar_folga que ja existia pra tela 'Confirmar folgas', zero schema novo) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v12.0 (chat ganha ferramenta consultar_link_clickbus - pedido do Rafael 03/09 'ideia e' ter mais viagens de onibus, conseguimos adicionar o clickbus como adicionamos o skyscanner?'. MESMO principio do skyscanner: nunca preco, so' link real pra conferir manualmente. ClickBus nao documenta um deep-link oficial tipo o do Skyscanner - formato confirmado por observacao direta dos links reais publicados na home deles em 03/09 (nao chutado), sem parametro de data confirmado (por isso a ferramenta nao tenta incluir data, so' cidade+UF) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -23,6 +23,8 @@
 import base64
 import io
 import os
+import re
+import unicodedata
 import uuid
 from datetime import date, datetime
 
@@ -57,7 +59,7 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v11.0"
+VERSAO_APP = "v12.0"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -186,6 +188,56 @@ def _link_skyscanner(origem_txt, destino_txt, data_ida_str):
     }
 
 
+def _slug_cidade_clickbus(cidade, uf):
+    """Gera o slug de cidade+UF no formato que o ClickBus usa nas paginas
+    de rota - confirmado lendo os links REAIS publicados na propria home
+    de clickbus.com.br em 03/09 (ex.: 'sao-paulo-sp-todos',
+    'belo-horizonte-mg-todos'), nao documentado oficialmente como o
+    deep-link do Skyscanner (ClickBus so' tem programa de afiliado via
+    rede externa, sem link direto por parametro), entao isso e' best-
+    effort por observacao, nao garantido pra toda cidade - por isso o
+    link sempre volta pro usuario conferir antes de confiar, mesma
+    logica do link do Skyscanner."""
+    if not cidade or not uf:
+        return None
+    texto = unicodedata.normalize("NFKD", cidade.strip()).encode("ascii", "ignore").decode("ascii")
+    texto = texto.lower()
+    texto = re.sub(r"[^a-z0-9]+", "-", texto).strip("-")
+    if not texto:
+        return None
+    return f"{texto}-{uf.strip().lower()}-todos"
+
+
+def _link_clickbus(origem_cidade, origem_uf, destino_cidade, destino_uf):
+    """Monta o link de busca de rota de onibus no ClickBus - MESMO
+    principio do _link_skyscanner: nunca preco, so' abre a pagina real
+    pra conferir manualmente. NAO suporta data especifica (nao achei
+    parametro de data confirmado nos links reais observados, e o projeto
+    nao chuta formato nao verificado - ver nota em _slug_cidade_clickbus)
+    - quem escolhe a data e' o usuario, direto na pagina do ClickBus."""
+    slug_origem = _slug_cidade_clickbus(origem_cidade, origem_uf)
+    slug_destino = _slug_cidade_clickbus(destino_cidade, destino_uf)
+    if not slug_origem or not slug_destino:
+        faltando = []
+        if not slug_origem:
+            faltando.append("origem (cidade + UF)")
+        if not slug_destino:
+            faltando.append("destino (cidade + UF)")
+        return {
+            "erro": (
+                f"Faltou informar {' e '.join(faltando)} - peca cidade e UF completos "
+                "(ex.: cidade='Fortaleza', uf='CE')."
+            )
+        }
+    url = f"https://www.clickbus.com.br/onibus/{slug_origem}/{slug_destino}"
+    return {
+        "origem": f"{origem_cidade.strip()} - {origem_uf.strip().upper()}",
+        "destino": f"{destino_cidade.strip()} - {destino_uf.strip().upper()}",
+        "link_clickbus": url,
+        "aviso": "Link nao inclui data - escolha a data direto na pagina do ClickBus.",
+    }
+
+
 def _filtrar_dash_multi_viajai(itens):
     """Limpa a lista de chamadas de ferramenta acumuladas numa mesma
     pergunta antes de virar 'Analise do assistente' (dash_multi_viajai):
@@ -297,6 +349,7 @@ TITULOS_RELATORIO_VIAJAI = {
     "consultar_localizacoes_canteiro": "Localizações de canteiro",
     "consultar_distancia_carro": "Distância de carro (Google Maps)",
     "consultar_link_skyscanner": "Link de busca (Skyscanner)",
+    "consultar_link_clickbus": "Link de busca (ClickBus)",
 }
 
 # Atalhos de relatorio rapido (pedido do Rafael 03/09: "botaozinho que pede
@@ -1572,6 +1625,27 @@ TOOLS_VIAJAI = [
         },
     },
     {
+        "name": "consultar_link_clickbus",
+        "description": (
+            "Monta um link pronto pra abrir a busca de passagem de ONIBUS no ClickBus (site "
+            "real deles) - use quando o usuario pedir pra 'buscar passagem de onibus', 'ver "
+            "rota de onibus' etc. Precisa de cidade E UF pra origem e destino (ex.: cidade "
+            "'Fortaleza', uf 'CE') - sem UF nao da' pra montar o link direito. NAO suporta data "
+            "especifica (o usuario escolhe a data na propria pagina do ClickBus depois de "
+            "abrir). NUNCA devolve preco nenhum - so' o link."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origem_cidade": {"type": "string", "description": "Cidade de origem"},
+                "origem_uf": {"type": "string", "description": "UF (sigla, 2 letras) da origem"},
+                "destino_cidade": {"type": "string", "description": "Cidade de destino"},
+                "destino_uf": {"type": "string", "description": "UF (sigla, 2 letras) do destino"},
+            },
+            "required": ["origem_cidade", "origem_uf", "destino_cidade", "destino_uf"],
+        },
+    },
+    {
         "name": "propor_atualizar_folga",
         "description": (
             "Propoe atualizar o status de UMA folga especifica (confirmar saida/retorno, marcar "
@@ -1678,6 +1752,13 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             # busca/mostra preco, so' devolve o link pronto.
             return _link_skyscanner(
                 entrada.get("origem", ""), entrada.get("destino", ""), entrada.get("data_ida", "")
+            )
+        elif nome == "consultar_link_clickbus":
+            # mesma logica do skyscanner: nao passa pelo supabase, so' monta
+            # URL local, nunca mostra preco.
+            return _link_clickbus(
+                entrada.get("origem_cidade", ""), entrada.get("origem_uf", ""),
+                entrada.get("destino_cidade", ""), entrada.get("destino_uf", ""),
             )
         elif nome == "propor_lancamento_rapido":
             # NUNCA grava aqui - so' monta a proposta pro usuario confirmar
@@ -1875,6 +1956,9 @@ def _montar_system_prompt_viajai(usuario_email):
         "so' um link pronto pro site real deles, NUNCA um preco - se der erro de origem/"
         "destino nao reconhecido, peca o codigo do aeroporto direto).\n"
         "- usuario disse que uma folga MUDOU (confirmou saida/retorno, vendeu, cancelou) -> "
+        "- usuario pede pra buscar/cotar passagem de ONIBUS -> consultar_link_clickbus (precisa "
+        "cidade + UF de origem e destino; devolve so' link, NUNCA preco; nao suporta data "
+        "especifica, avise que a data e' escolhida na pagina do ClickBus).\n"
         "propor_atualizar_folga (so' propoe, nunca grava sozinho; se der erro de nome nao "
         "achado ou ambiguo, oriente a usar a tela 'Confirmar folgas' direto)."
     )
