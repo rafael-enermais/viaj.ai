@@ -1,4 +1,4 @@
-# Viaj.AI — v7.2 (bugfix real: pg_get_functiondef confirmou schema_v0.19 ativo e calculo correto (1280), mas chat repetia R$640 - causa raiz achada: modelo respondia com o valor da PROPRIA resposta anterior (persistida no historico da conversa) em vez de chamar a ferramenta de novo; system prompt agora instrui explicitamente a sempre re-chamar a ferramenta em pergunta repetida, nunca confiar em resposta anterior pra dado que pode ter mudado) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v7.3 (janela deslizante no chat: so as ultimas JANELA_HISTORICO_CHAT=24 mensagens vao pro contexto da API a cada pergunta - achado 03/09 debugando o bug do R$640, historico sem limite crescia sem fim dentro da sessao e custava mais token com o tempo de uso; log completo continua salvo no banco pra sempre, so o contexto ativo que fica limitado; tambem: rodape da sidebar com VERSAO_APP/CONTATO_SUPORTE pra manter visivel qual versao esta rodando) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -52,6 +52,23 @@ GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 # de novo aqui se isso mudar (mesmo erro que o TIA.go deixou marcado: nunca
 # hardcoded sem checar contra a conta/doc na hora).
 MODEL_ID = "claude-sonnet-5"
+
+# Versao/contato exibidos no rodape da sidebar (pedido do Rafael 03/09:
+# "anotar a versao e contato pra manter atualizando conforme evolucao") -
+# atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
+# no topo do arquivo), pra sempre bater com o que esta rodando de fato.
+VERSAO_APP = "v7.3"
+CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
+
+# Quantas mensagens do chat entram no contexto enviado pra API a cada
+# pergunta (janela deslizante) - achado 03/09 debugando o bug do R$640:
+# sem limite, toda a conversa (persistida por usuario desde schema_v0.11)
+# crescia sem fim dentro da sessao e ia inteira em toda chamada, custando
+# mais token a cada pergunta E aumentando o risco do modelo reaproveitar
+# resposta velha em vez de consultar de novo. O HISTORICO COMPLETO continua
+# salvo pra sempre no banco (viajai_salvar_mensagem_chat) - esse numero so
+# limita o que e' REENVIADO como contexto ativo pra API.
+JANELA_HISTORICO_CHAT = 24
 
 st.set_page_config(page_title="Viaj.AI", page_icon="🧳", layout="wide")
 
@@ -1464,6 +1481,12 @@ def pagina_chat(supabase):
         "'comprei N passagens de X pra Y' e prepara o lançamento, mas só grava depois que "
         "você confirmar no painel ao lado — nunca escreve sozinho."
     )
+    st.caption(
+        f"Obs.: o assistente lembra só das últimas {JANELA_HISTORICO_CHAT} mensagens desta "
+        "conversa (fica mais rápido e evita confundir com resposta antiga) — o histórico "
+        "completo continua salvo. Pra números que mudam (previsão, gasto), pergunte de novo "
+        "em vez de confiar numa resposta antiga."
+    )
 
     if not ANTHROPIC_API_KEY:
         st.warning(
@@ -1473,7 +1496,11 @@ def pagina_chat(supabase):
         return
 
     if "mensagens_chat" not in st.session_state:
-        hist = supabase.rpc("viajai_listar_historico_chat", {"p_limite": 50}).execute()
+        # carrega so as ultimas JANELA_HISTORICO_CHAT (o log completo continua
+        # no banco pra sempre, isso e' so o que entra no contexto ativo)
+        hist = supabase.rpc(
+            "viajai_listar_historico_chat", {"p_limite": JANELA_HISTORICO_CHAT}
+        ).execute()
         st.session_state.mensagens_chat = [
             {"role": m["papel"], "content": m["conteudo"]} for m in (hist.data or [])
         ]
@@ -1717,9 +1744,16 @@ def pagina_chat(supabase):
             texto_final = None
             try:
                 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                # janela deslizante (achado 03/09, ver JANELA_HISTORICO_CHAT no
+                # topo do arquivo): sem esse corte, a lista cresce sem limite
+                # dentro da sessao (append a cada resposta) e vai inteira pra
+                # API em toda pergunta - mais token gasto com o tempo de uso E
+                # mais chance do modelo reaproveitar resposta velha em vez de
+                # consultar de novo. So corta o que vai pro contexto ativo, o
+                # log completo continua salvo no banco pra sempre.
                 mensagens_api = [
                     {"role": m["role"], "content": m["content"]}
-                    for m in st.session_state.mensagens_chat
+                    for m in st.session_state.mensagens_chat[-JANELA_HISTORICO_CHAT:]
                     if isinstance(m["content"], str)
                 ]
                 system_prompt = _montar_system_prompt_viajai(st.session_state.usuario)
@@ -1811,6 +1845,10 @@ def main():
             supabase.auth.sign_out()
             del st.session_state.sessao
             st.rerun()
+        # rodape de versao/contato (pedido do Rafael 03/09: "anotar a versao
+        # e contato pra manter atualizando conforme evolucao") - atualizar
+        # VERSAO_APP no topo do arquivo a cada bump, aparece aqui sozinho.
+        st.caption(f"{VERSAO_APP} — dúvidas/manutenção: {CONTATO_SUPORTE}")
 
     if pagina == "Importar RE090":
         pagina_importar_re090(supabase)
