@@ -1,4 +1,4 @@
-# Viaj.AI — v4.1 (fix: chat_input fixo embaixo + historico com rolagem propria, truncamento sempre avisado, resumo em vez de listar tudo) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v5.0 (lancamento rapido pode ser atribuido a um colaborador - chat propoe/resolve nome, tela sempre com seletor de seguranca - alimenta previsao de gasto por colaborador, schema_v0.17) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -892,6 +892,9 @@ def pagina_custo_passagens(supabase):
             "(ex.: \"comprei 10 passagens do Ceará pra SP\") — serve pra "
             "somar gasto por rota/período e ajudar a prever."
         )
+        _colabs_resp_lr = supabase.rpc("viajai_colaboradores_ativos").execute()
+        _colabs_opcoes_lr = ["— Lote / sem definir —"] + [c["nome"] for c in (_colabs_resp_lr.data or [])]
+        _colabs_por_nome_lr = {c["nome"]: c["colaborador_id"] for c in (_colabs_resp_lr.data or [])}
         with st.form("form_lancamento_rapido"):
             c1, c2 = st.columns(2)
             origem_lr = c1.text_input("Origem", key="lr_origem")
@@ -902,6 +905,7 @@ def pagina_custo_passagens(supabase):
             valor_lr = c5.number_input("Valor total (R$)", min_value=0.0, step=0.01, format="%.2f", key="lr_valor")
             data_lr = st.date_input("Data da compra", value=date.today(), key="lr_data")
             obs_lr = st.text_input("Observação (opcional)", key="lr_obs")
+            colab_lr = st.selectbox("Colaborador (opcional)", _colabs_opcoes_lr, key="lr_colab")
             enviar_lr = st.form_submit_button("Registrar")
 
         if enviar_lr:
@@ -917,6 +921,7 @@ def pagina_custo_passagens(supabase):
                         "p_modal": modal_lr,
                         "p_data": data_lr.isoformat() if data_lr else None,
                         "p_observacao": obs_lr or None,
+                        "p_colaborador_id": _colabs_por_nome_lr.get(colab_lr),
                     }).execute()
                     st.success("Lançamento registrado.")
                     st.rerun()
@@ -935,7 +940,11 @@ def pagina_custo_passagens(supabase):
             # RPC nova em schema_v0.16 (viajai_apagar_lancamento_rapido).
             with st.expander("Apagar um lançamento (teste ou erro de digitação)"):
                 df_lanc["_rotulo"] = df_lanc.apply(
-                    lambda r: f"#{r['id']} — {r['origem']} -> {r['destino']} — R$ {r['valor_total']:.2f} — {r.get('observacao') or ''}",
+                    lambda r: (
+                        f"#{r['id']} — {r['origem']} -> {r['destino']} — R$ {r['valor_total']:.2f}"
+                        + (f" — {r['colaborador_nome']}" if r.get("colaborador_nome") else "")
+                        + f" — {r.get('observacao') or ''}"
+                    ),
                     axis=1,
                 )
                 rotulo_apagar = st.selectbox("Qual?", df_lanc["_rotulo"], key="lr_apagar_select")
@@ -1105,11 +1114,40 @@ TOOLS_VIAJAI = [
                 "modal": {"type": "string", "enum": ["aviao", "onibus", "carro", "taxi", "outro"], "description": "Padrao aviao"},
                 "data": {"type": "string", "description": "Data da compra, formato YYYY-MM-DD (padrao hoje)"},
                 "observacao": {"type": "string", "description": "Detalhe extra opcional (ex.: nome do fornecedor, se foi dito)"},
+                "colaborador_nome": {
+                    "type": "string",
+                    "description": (
+                        "Nome do colaborador, SO' se o usuario disse que e' pra uma pessoa "
+                        "especifica (ex.: 'passagem do Joao'). Deixe vazio se for lote/compra "
+                        "em massa sem pessoa definida ainda - nao pergunte isso sempre, so' "
+                        "quando a frase do usuario ficar ambigua sobre isso."
+                    ),
+                },
             },
             "required": ["origem", "destino", "valor_total"],
         },
     },
 ]
+
+
+def _resolver_colaborador_por_nome(supabase, nome_busca):
+    """Tenta achar 1 colaborador ativo cujo nome contenha o texto dito no
+    chat (case-insensitive). So' resolve se achar exatamente 1 - se achar
+    0 ou mais de 1 (nome ambiguo), devolve (None, None) e deixa a pessoa
+    escolher direto no seletor do painel de confirmacao (rede de seguranca,
+    pedido do Rafael 03/09: "direcionar pra quem ficara esse custo antes
+    de pensar em gravar")."""
+    nome_busca = (nome_busca or "").strip().lower()
+    if not nome_busca:
+        return None, None
+    try:
+        r = supabase.rpc("viajai_colaboradores_ativos").execute()
+    except Exception:
+        return None, None
+    candidatos = [c for c in (r.data or []) if nome_busca in (c.get("nome") or "").lower()]
+    if len(candidatos) == 1:
+        return candidatos[0]["colaborador_id"], candidatos[0]["nome"]
+    return None, None
 
 
 def _executar_ferramenta_viajai(supabase, nome, entrada):
@@ -1156,6 +1194,10 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             valor_total = entrada.get("valor_total")
             if not origem or not destino or not valor_total:
                 return {"erro": "faltou origem, destino ou valor_total - pergunte pro usuario antes de propor de novo"}
+            colaborador_nome_dito = (entrada.get("colaborador_nome") or "").strip()
+            colaborador_id_resolvido, colaborador_nome_resolvido = _resolver_colaborador_por_nome(
+                supabase, colaborador_nome_dito
+            )
             st.session_state.acao_pendente_viajai = {
                 "tipo": "lancamento_rapido",
                 "origem": origem,
@@ -1165,10 +1207,21 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
                 "modal": entrada.get("modal") or "aviao",
                 "data": entrada.get("data") or date.today().isoformat(),
                 "observacao": entrada.get("observacao") or "",
+                "colaborador_id": colaborador_id_resolvido,
+                "colaborador_nome": colaborador_nome_resolvido,
             }
+            resumo = f"{entrada.get('quantidade') or 1}x {origem} -> {destino}, R$ {float(valor_total):.2f}"
+            aviso_colaborador = ""
+            if colaborador_nome_dito and not colaborador_id_resolvido:
+                aviso_colaborador = (
+                    f" (nao encontrei '{colaborador_nome_dito}' com certeza entre os "
+                    "colaboradores ativos - avise o usuario pra escolher direto no painel)"
+                )
+            elif colaborador_nome_resolvido:
+                resumo += f" — {colaborador_nome_resolvido}"
             return {
-                "status": "proposta pronta, aguardando o usuario confirmar no painel lateral (nao foi gravado ainda)",
-                "resumo": f"{entrada.get('quantidade') or 1}x {origem} -> {destino}, R$ {float(valor_total):.2f}",
+                "status": "proposta pronta, aguardando o usuario confirmar no painel lateral (nao foi gravado ainda)" + aviso_colaborador,
+                "resumo": resumo,
             }
         else:
             return {"erro": "ferramenta desconhecida"}
@@ -1203,9 +1256,15 @@ def _montar_system_prompt_viajai(usuario_email):
         "passagens do Ceara pra SP por 3500') — mas isso NUNCA grava direto: so' monta uma "
         "proposta que aparece pro usuario confirmar na tela antes de qualquer coisa ir pro "
         "banco. So' chame essa ferramenta com origem, destino e valor_total certos; se "
-        "faltar algum, pergunte antes (nunca invente valor pra completar). Fora isso, voce "
-        "ainda so' CONSULTA — outras acoes (confirmar folga, registrar trecho/gasto de uma "
-        "folga especifica) nao tem ferramenta ainda, oriente a usar a tela correspondente.\n\n"
+        "faltar algum, pergunte antes (nunca invente valor pra completar). Se o usuario "
+        "citar o nome de uma pessoa especifica pra quem e' a passagem, passe em "
+        "colaborador_nome. Se parecer lote/compra em massa sem pessoa definida ainda (ex.: "
+        "'comprei 10 passagens do Ceara pra SP'), NAO pergunte de quem e' - isso e' normal e "
+        "fica sem colaborador definido, a pessoa pode atribuir depois na tela. So' pergunte "
+        "'e' pra alguem especifico ou lote sem definir ainda?' quando a frase ficar realmente "
+        "ambigua sobre isso. Fora essa proposta, voce ainda so' CONSULTA — outras acoes "
+        "(confirmar folga, registrar trecho/gasto de uma folga especifica) nao tem ferramenta "
+        "ainda, oriente a usar a tela correspondente.\n\n"
         "Guia de qual ferramenta usar:\n"
         "- quem esta de folga / precisa viajar / urgencia -> consultar_previsao_folgas.\n"
         "- pendencia de import / nao bateu no RH -> consultar_pendencias_import.\n"
@@ -1288,6 +1347,20 @@ def pagina_chat(supabase):
             # aqui. Campos vem preenchidos com o que a IA extraiu, mas dao
             # pra corrigir antes de confirmar - camada extra de seguranca.
             st.warning("Confirme antes de gravar — extraído da conversa, revise se estiver errado")
+            # Colaborador - pedido do Rafael 03/09: "teria q direcionar pra
+            # quem ficara esse custo primeiro antes de pensar em gravar".
+            # A IA tenta resolver pelo nome citado (propor_lancamento_rapido
+            # -> _resolver_colaborador_por_nome), mas o campo aqui e' sempre
+            # editavel - rede de seguranca pra quando nao achou ou achou
+            # nome ambiguo. Fica opcional (lote sem pessoa definida continua
+            # valido, schema_v0.17).
+            _colabs_resp = supabase.rpc("viajai_colaboradores_ativos").execute()
+            _colabs_lista = _colabs_resp.data or []
+            _colabs_opcoes = ["— Lote / sem definir —"] + [c["nome"] for c in _colabs_lista]
+            _colabs_por_nome = {c["nome"]: c["colaborador_id"] for c in _colabs_lista}
+            _indice_colab_default = 0
+            if acao.get("colaborador_nome") and acao["colaborador_nome"] in _colabs_opcoes:
+                _indice_colab_default = _colabs_opcoes.index(acao["colaborador_nome"])
             with st.form("form_confirmar_lancamento_ia"):
                 c_origem = st.text_input("Origem", value=acao["origem"])
                 c_destino = st.text_input("Destino", value=acao["destino"])
@@ -1303,17 +1376,23 @@ def pagina_chat(supabase):
                     _data_default = date.today()
                 c_data = st.date_input("Data", value=_data_default)
                 c_obs = st.text_input("Observação", value=acao.get("observacao", ""))
+                c_colab = st.selectbox("Colaborador (opcional)", _colabs_opcoes, index=_indice_colab_default)
                 col_ok, col_no = st.columns(2)
                 confirmar = col_ok.form_submit_button("✅ Confirmar e registrar", use_container_width=True)
                 cancelar = col_no.form_submit_button("Cancelar", use_container_width=True)
 
             if confirmar:
+                _colab_id_confirmar = _colabs_por_nome.get(c_colab)
                 _novo_id = supabase.rpc("viajai_registrar_lancamento_rapido", {
                     "p_origem": c_origem, "p_destino": c_destino, "p_valor_total": c_valor,
                     "p_quantidade": int(c_qtd), "p_modal": c_modal,
                     "p_data": c_data.isoformat(), "p_observacao": c_obs or None,
+                    "p_colaborador_id": _colab_id_confirmar,
                 }).execute().data
                 del st.session_state.acao_pendente_viajai
+                _resumo_txt = f"{int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}"
+                if _colab_id_confirmar:
+                    _resumo_txt += f" — {c_colab}"
                 # Guarda o id pra oferecer "Desfazer" na hora - pedido do
                 # Rafael 03/09 (testar e conseguir apagar/desfazer facil,
                 # sem precisar de SQL Editor). schema_v0.16 precisa estar
@@ -1321,15 +1400,15 @@ def pagina_chat(supabase):
                 # o botao "Desfazer" abaixo vai dar erro claro na hora.
                 st.session_state.ultimo_lancamento_viajai = {
                     "id": _novo_id,
-                    "resumo": f"{int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}",
+                    "resumo": _resumo_txt,
                 }
                 st.session_state.mensagens_chat.append({
                     "role": "assistant",
-                    "content": f"Registrado: {int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}.",
+                    "content": f"Registrado: {_resumo_txt}.",
                 })
                 supabase.rpc("viajai_salvar_mensagem_chat", {
                     "p_papel": "assistant",
-                    "p_conteudo": f"Registrado: {int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}.",
+                    "p_conteudo": f"Registrado: {_resumo_txt}.",
                 }).execute()
                 st.rerun()
             elif cancelar:
