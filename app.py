@@ -1,4 +1,4 @@
-# Viaj.AI — v7.3 (janela deslizante no chat: so as ultimas JANELA_HISTORICO_CHAT=24 mensagens vao pro contexto da API a cada pergunta - achado 03/09 debugando o bug do R$640, historico sem limite crescia sem fim dentro da sessao e custava mais token com o tempo de uso; log completo continua salvo no banco pra sempre, so o contexto ativo que fica limitado; tambem: rodape da sidebar com VERSAO_APP/CONTATO_SUPORTE pra manter visivel qual versao esta rodando) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v8.0 (nova funcao: relatorios do chat, padrao TIA.go portado - botao 'Baixar relatorio desta consulta' empacota o que esta no painel lateral (dash_extra_viajai) num HTML autocontido com cores EnerMais, funciona tanto pra resultado de pergunta em linguagem natural quanto pra atalho; nova linha de 5 botoes de 'Atalho de relatorio' no topo do chat que chamam a RPC direto - sem passar pela IA, zero custo de token, instantaneo) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -57,8 +57,14 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v7.3"
+VERSAO_APP = "v8.0"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
+
+# Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
+# portar - amostradas do logo-enermais.png) - usadas no relatorio HTML
+# exportavel do chat (ver gerar_relatorio_html_viajai).
+NAVY = "#171D62"
+LARANJA = "#FA9C20"
 
 # Quantas mensagens do chat entram no contexto enviado pra API a cada
 # pergunta (janela deslizante) - achado 03/09 debugando o bug do R$640:
@@ -195,6 +201,128 @@ def _botao_exportar_excel(df, nome_arquivo, label="Exportar Excel"):
         file_name=nome_arquivo,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"export_{nome_arquivo}",
+    )
+
+
+TITULOS_RELATORIO_VIAJAI = {
+    "consultar_previsao_folgas": "Previsão de folgas",
+    "consultar_pendencias_import": "Pendências de import",
+    "consultar_historico_folga": "Histórico de folgas",
+    "consultar_desvio_planejamento": "Desvio de planejamento",
+    "consultar_previsao_gasto_colaborador": "Previsão de gasto por colaborador",
+    "consultar_comparativo_custo_folga": "Comparativo de custo x desvio",
+    "consultar_sugestao_fornecedor_rota": "Sugestão de fornecedor por rota",
+    "consultar_comparar_modais_rota": "Comparativo de modais por rota",
+    "consultar_resumo_custo_por_rota": "Resumo de custo por rota",
+    "consultar_gasto_por_periodo": "Gasto por período",
+    "consultar_lancamentos_rapidos": "Lançamentos rápidos recentes",
+    "consultar_localizacoes_canteiro": "Localizações de canteiro",
+    "consultar_distancia_carro": "Distância de carro (Google Maps)",
+}
+
+# Atalhos de relatorio rapido (pedido do Rafael 03/09: "botaozinho que pede
+# um relatorio ou tabela especifica") - chamam a MESMA RPC que a ferramenta
+# do chat chamaria, so' que direto (sem passar pela IA/Anthropic) - zero
+# custo de token, resposta instantanea, determinístico. O chat em
+# linguagem natural continua funcionando igual pra tudo que nao tiver
+# atalho ou pra pergunta mais especifica/combinada.
+REPORTS_RAPIDOS_VIAJAI = [
+    {"label": "📊 Previsão de folgas", "tool": "consultar_previsao_folgas", "input": {}},
+    {"label": "💰 Previsão de gasto", "tool": "consultar_previsao_gasto_colaborador", "input": {}},
+    {"label": "🚩 Desvio de planejamento", "tool": "consultar_desvio_planejamento", "input": {"limite": 200}},
+    {"label": "🗺️ Resumo por rota", "tool": "consultar_resumo_custo_por_rota", "input": {"limite": 100}},
+    {"label": "📅 Gasto por período", "tool": "consultar_gasto_por_periodo", "input": {"meses": 12}},
+]
+
+
+def gerar_relatorio_html_viajai(extra):
+    """Empacota o que esta no painel lateral (dash_extra_viajai) num HTML
+    autocontido pra baixar, abrir em qualquer navegador, imprimir em PDF
+    (Ctrl+P > Salvar como PDF) ou mandar por e-mail/Teams. Mesmo padrao do
+    TIA.go (gerar_relatorio_html, codigo real conferido antes de portar) -
+    adaptado porque o Viaj.AI nao usa plotly (so' st.bar_chart nativo): o
+    unico grafico (gasto por periodo) vira um mini bar chart em CSS puro
+    em vez de fig.to_html() do plotly - zero dependencia nova, mesmo
+    espirito de "nao antecipar complexidade que nao precisa ainda".
+    Pedido do Rafael 03/09: "o chat pode adiantar geracao de relatorios" -
+    funciona tanto pra resultado que veio de atalho (REPORTS_RAPIDOS_VIAJAI)
+    quanto de pergunta em linguagem natural, e' o mesmo dash_extra_viajai
+    dos dois jeitos.
+    """
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    usuario = st.session_state.get("usuario", "")
+    tool = extra.get("tool", "")
+    titulo = TITULOS_RELATORIO_VIAJAI.get(tool, "Relatório Viaj.AI")
+    resultado = extra.get("resultado")
+
+    if not resultado:
+        corpo = "<p>Nenhum dado encontrado para essa consulta.</p>"
+    elif isinstance(resultado, dict):
+        if resultado.get("erro"):
+            corpo = f"<p>{resultado['erro']}</p>"
+        else:
+            linhas = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in resultado.items())
+            corpo = f"<table class='tabela'>{linhas}</table>"
+    else:
+        df = pd.DataFrame(resultado)
+        if tool == "consultar_gasto_por_periodo" and {"periodo", "valor_total"}.issubset(df.columns):
+            maximo = df["valor_total"].max() or 1
+            barras = "".join(
+                f"<div class='barra-linha'><span class='barra-rotulo'>{r['periodo']}</span>"
+                f"<div class='barra-fundo'><div class='barra-cheia' "
+                f"style='width:{(r['valor_total'] / maximo) * 100:.1f}%'></div></div>"
+                f"<span class='barra-valor'>R$ {r['valor_total']:.2f}</span></div>"
+                for _, r in df.iterrows()
+            )
+            corpo = f"<div class='grafico-barras'>{barras}</div>" + df.to_html(index=False, border=0, classes="tabela")
+        else:
+            corpo = df.to_html(index=False, border=0, classes="tabela")
+
+    html = f"""<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>{titulo} — Viaj.AI</title>
+<style>
+  body {{ font-family: Arial, Helvetica, sans-serif; background: #fff; color: #1a1a1a; margin: 32px; }}
+  header {{ border-bottom: 4px solid {LARANJA}; padding-bottom: 12px; margin-bottom: 24px; }}
+  h1 {{ color: {NAVY}; margin: 0 0 4px 0; font-size: 22px; }}
+  .meta {{ color: #666; font-size: 13px; }}
+  table.tabela {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
+  table.tabela th {{ background: {NAVY}; color: #fff; text-align: left; padding: 8px 10px; font-size: 13px; }}
+  table.tabela td {{ padding: 7px 10px; border-bottom: 1px solid #e5e5e5; font-size: 13px; }}
+  table.tabela tr:nth-child(even) td {{ background: #f7f7f9; }}
+  .grafico-barras {{ margin: 16px 0; }}
+  .barra-linha {{ display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }}
+  .barra-rotulo {{ width: 90px; font-size: 12px; color: #444; }}
+  .barra-fundo {{ flex: 1; background: #eee; border-radius: 3px; overflow: hidden; height: 16px; }}
+  .barra-cheia {{ background: {LARANJA}; height: 100%; }}
+  .barra-valor {{ width: 110px; font-size: 12px; text-align: right; color: #444; }}
+  footer {{ margin-top: 32px; font-size: 11px; color: #999; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>{titulo}</h1>
+  <div class="meta">Gerado em {agora} por {usuario} — Viaj.AI {VERSAO_APP}</div>
+</header>
+{corpo}
+<footer>Viaj.AI — EnerMais. Dado extraído do sistema no momento da geração, nunca busca preço externo.</footer>
+</body>
+</html>"""
+    return html.encode("utf-8")
+
+
+def _botao_baixar_relatorio_html(extra, key):
+    """Botao de download do relatorio empacotado (ver gerar_relatorio_html_viajai)."""
+    tool = extra.get("tool", "relatorio")
+    nome_arquivo = f"viajai_{tool}.html"
+    st.download_button(
+        "📄 Baixar relatório desta consulta",
+        data=gerar_relatorio_html_viajai(extra),
+        file_name=nome_arquivo,
+        mime="text/html",
+        key=key,
     )
 
 
@@ -1488,10 +1616,30 @@ def pagina_chat(supabase):
         "em vez de confiar numa resposta antiga."
     )
 
+    # atalhos de relatorio (pedido do Rafael 03/09) ficam ANTES do check da
+    # chave Anthropic de proposito: chamam a RPC direto, nunca passam pela IA,
+    # entao nao dependem de ANTHROPIC_API_KEY pra funcionar.
+    st.caption("Atalhos de relatório (instantâneo, não passa pela IA):")
+    _cols_atalho = st.columns(len(REPORTS_RAPIDOS_VIAJAI))
+    for _col, _rep in zip(_cols_atalho, REPORTS_RAPIDOS_VIAJAI):
+        if _col.button(_rep["label"], key=f"atalho_{_rep['tool']}", use_container_width=True):
+            _resultado_atalho = _executar_ferramenta_viajai(supabase, _rep["tool"], _rep["input"])
+            st.session_state.dash_extra_viajai = {
+                "tool": _rep["tool"], "input": _rep["input"], "resultado": _resultado_atalho,
+            }
+            st.rerun()
+
     if not ANTHROPIC_API_KEY:
+        # limitacao aceita: sem essa chave a funcao para aqui, entao o painel
+        # com a tabela/download do atalho clicado acima nao chega a aparecer
+        # nesse caso especifico (na pratica nao acontece - a chave ja esta
+        # configurada em producao; se um dia sumir, so mover o bloco de
+        # col_dash pra fora desse return resolve, nao fiz agora pra nao mexer
+        # numa pagina que ja funciona por uma situacao que nao ocorre hoje).
         st.warning(
             "Chave da Anthropic ainda não configurada (Secrets do Streamlit Cloud: "
-            "ANTHROPIC_API_KEY) — o assistente não funciona sem ela."
+            "ANTHROPIC_API_KEY) — o chat em linguagem natural não funciona sem ela "
+            "(mas os atalhos de relatório acima funcionam sem essa chave)."
         )
         return
 
@@ -1717,6 +1865,7 @@ def pagina_chat(supabase):
             else:
                 df_dash = pd.DataFrame(resultado)
                 st.dataframe(df_dash, use_container_width=True, hide_index=True)
+                _botao_baixar_relatorio_html(extra, key="baixar_relatorio_dash")
                 if extra.get("tool") == "consultar_localizacoes_canteiro" and {
                     "latitude", "longitude"
                 }.issubset(df_dash.columns):
