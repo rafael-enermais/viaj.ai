@@ -1,4 +1,4 @@
-# Viaj.AI — v7.0 (nova funcao: consultar_distancia_carro no chat + expansor 'Estimar por carro' na pagina de Custo/Passagens, usando Google Distance Matrix API - so' geografia real km/tempo, preco NUNCA vem da internet, so' do historico proprio; tambem: schema_v0.19 corrige calculo de previsao de gasto que tratava trechos separados do mesmo dia como amostras distintas, diluindo a media) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v7.1 (schema_v0.20: previsao de gasto ganha 4o nivel de fallback - media de TODA a empresa, so' dado real ja lancado, nunca inventado - quando colaborador/canteiro/obra nao tem nenhum historico proprio ainda; tool description e system prompt do chat atualizados pra explicar esse novo 'base_previsao=empresa') — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -1135,7 +1135,7 @@ TOOLS_VIAJAI = [
     },
     {
         "name": "consultar_previsao_gasto_colaborador",
-        "description": "Previsao de gasto por colaborador: media do historico da propria pessoa, ou do canteiro/obra dela se nao tiver historico proprio. Devolve tambem 'base_previsao' (colaborador/canteiro/obra/sem_dado) - sempre informe essa base na resposta.",
+        "description": "Previsao de gasto por colaborador: media do historico REAL (nunca inventado) da propria pessoa; se nao tiver, cai pro canteiro dela; se nao tiver, pra obra; se nem a obra tiver nada, cai pra media de TODA a empresa (todo lancamento real ja registrado, base_previsao= 'empresa') como ultimo recurso antes de 'sem_dado'. Devolve tambem 'base_previsao' ""(colaborador/canteiro/obra/empresa/sem_dado) - sempre informe essa base na resposta, e deixe claro pro usuario quando for 'empresa' que e' uma media geral, nao especifica dessa pessoa.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -1420,7 +1420,8 @@ def _montar_system_prompt_viajai(usuario_email):
         "- historico de mudanca de status de folga -> consultar_historico_folga.\n"
         "- quem atrasou / desvio do planejado -> consultar_desvio_planejamento.\n"
         "- previsao de gasto por colaborador -> consultar_previsao_gasto_colaborador "
-        "(sempre informe o 'base_previsao' que vier na resposta).\n"
+        "(sempre informe o 'base_previsao' que vier na resposta - se vier 'empresa', deixe "
+        "claro que e' media geral da empresa toda, nao dado especifico dessa pessoa).\n"
         "- custo real x desvio de uma folga -> consultar_comparativo_custo_folga.\n"
         "- qual companhia mais usamos numa rota -> consultar_sugestao_fornecedor_rota "
         "(precisa origem e destino).\n"
