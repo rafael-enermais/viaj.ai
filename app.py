@@ -1,4 +1,4 @@
-# Viaj.AI — v5.0 (lancamento rapido pode ser atribuido a um colaborador - chat propoe/resolve nome, tela sempre com seletor de seguranca - alimenta previsao de gasto por colaborador, schema_v0.17) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v5.1 (ajuste visual: bloco do chat esticado pra alinhar com a altura do painel de confirmacao ao lado) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -1331,7 +1331,7 @@ def pagina_chat(supabase):
         # campo comum, sem fixar. Por isso o chat_input foi movido pra
         # fora das colunas (ve mais abaixo) e aqui a lista de mensagens
         # ganhou altura fixa com rolagem propria, pra nao esticar a pagina.
-        historico_box = st.container(height=480)
+        historico_box = st.container(height=640)
         with historico_box:
             for m in st.session_state.mensagens_chat:
                 with st.chat_message(m["role"]):
