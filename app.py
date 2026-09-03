@@ -1,4 +1,4 @@
-# Viaj.AI — v8.0 (nova funcao: relatorios do chat, padrao TIA.go portado - botao 'Baixar relatorio desta consulta' empacota o que esta no painel lateral (dash_extra_viajai) num HTML autocontido com cores EnerMais, funciona tanto pra resultado de pergunta em linguagem natural quanto pra atalho; nova linha de 5 botoes de 'Atalho de relatorio' no topo do chat que chamam a RPC direto - sem passar pela IA, zero custo de token, instantaneo) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v9.0 (novo quadro 'Analise do assistente' embaixo do painel de atalho no chat - pedido do Rafael 03/09: quando uma pergunta em linguagem natural pede comparacao/analise que precisa de mais de 1 consulta pra montar, dash_multi_viajai agora acumula TODAS as consultas daquela pergunta (nao so a ultima) + o texto que a IA escreveu, e um botao 'Gerar relatorio desta analise' empacota tudo junto - narrativa da IA + todas as tabelas - num HTML so, pra nao perder raciocinio elaborado que a IA monta sem forma pre-definida) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -57,7 +57,7 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v8.0"
+VERSAO_APP = "v9.0"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -235,6 +235,57 @@ REPORTS_RAPIDOS_VIAJAI = [
 ]
 
 
+def _corpo_item_relatorio_viajai(tool, resultado):
+    """Renderiza o corpo HTML de 1 item de consulta (tabela, dict ou
+    grafico de barras em CSS) - extraido de gerar_relatorio_html_viajai
+    pra ser reaproveitado tanto pelo relatorio de 1 consulta so' quanto
+    pelo relatorio combinado (varias consultas + texto da IA, ver
+    gerar_relatorio_analise_html_viajai)."""
+    if not resultado:
+        return "<p>Nenhum dado encontrado para essa consulta.</p>"
+    if isinstance(resultado, dict):
+        if resultado.get("erro"):
+            return f"<p>{resultado['erro']}</p>"
+        linhas = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in resultado.items())
+        return f"<table class='tabela'>{linhas}</table>"
+    df = pd.DataFrame(resultado)
+    if tool == "consultar_gasto_por_periodo" and {"periodo", "valor_total"}.issubset(df.columns):
+        maximo = df["valor_total"].max() or 1
+        barras = "".join(
+            f"<div class='barra-linha'><span class='barra-rotulo'>{r['periodo']}</span>"
+            f"<div class='barra-fundo'><div class='barra-cheia' "
+            f"style='width:{(r['valor_total'] / maximo) * 100:.1f}%'></div></div>"
+            f"<span class='barra-valor'>R$ {r['valor_total']:.2f}</span></div>"
+            for _, r in df.iterrows()
+        )
+        return f"<div class='grafico-barras'>{barras}</div>" + df.to_html(index=False, border=0, classes="tabela")
+    return df.to_html(index=False, border=0, classes="tabela")
+
+
+def _estilo_relatorio_viajai():
+    """CSS compartilhado pelos 2 geradores de relatorio (1 consulta e
+    combinado) - separado pra nao duplicar a folha de estilo inteira."""
+    return f"""
+  body {{ font-family: Arial, Helvetica, sans-serif; background: #fff; color: #1a1a1a; margin: 32px; }}
+  header {{ border-bottom: 4px solid {LARANJA}; padding-bottom: 12px; margin-bottom: 24px; }}
+  h1 {{ color: {NAVY}; margin: 0 0 4px 0; font-size: 22px; }}
+  h2 {{ color: {NAVY}; font-size: 16px; margin: 28px 0 8px 0; border-left: 4px solid {LARANJA}; padding-left: 8px; }}
+  .meta {{ color: #666; font-size: 13px; }}
+  .narrativa {{ background: #f7f7f9; border-radius: 6px; padding: 14px 16px; margin: 16px 0; font-size: 14px; line-height: 1.5; }}
+  table.tabela {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
+  table.tabela th {{ background: {NAVY}; color: #fff; text-align: left; padding: 8px 10px; font-size: 13px; }}
+  table.tabela td {{ padding: 7px 10px; border-bottom: 1px solid #e5e5e5; font-size: 13px; }}
+  table.tabela tr:nth-child(even) td {{ background: #f7f7f9; }}
+  .grafico-barras {{ margin: 16px 0; }}
+  .barra-linha {{ display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }}
+  .barra-rotulo {{ width: 90px; font-size: 12px; color: #444; }}
+  .barra-fundo {{ flex: 1; background: #eee; border-radius: 3px; overflow: hidden; height: 16px; }}
+  .barra-cheia {{ background: {LARANJA}; height: 100%; }}
+  .barra-valor {{ width: 110px; font-size: 12px; text-align: right; color: #444; }}
+  footer {{ margin-top: 32px; font-size: 11px; color: #999; }}
+"""
+
+
 def gerar_relatorio_html_viajai(extra):
     """Empacota o que esta no painel lateral (dash_extra_viajai) num HTML
     autocontido pra baixar, abrir em qualquer navegador, imprimir em PDF
@@ -253,53 +304,14 @@ def gerar_relatorio_html_viajai(extra):
     usuario = st.session_state.get("usuario", "")
     tool = extra.get("tool", "")
     titulo = TITULOS_RELATORIO_VIAJAI.get(tool, "Relatório Viaj.AI")
-    resultado = extra.get("resultado")
-
-    if not resultado:
-        corpo = "<p>Nenhum dado encontrado para essa consulta.</p>"
-    elif isinstance(resultado, dict):
-        if resultado.get("erro"):
-            corpo = f"<p>{resultado['erro']}</p>"
-        else:
-            linhas = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in resultado.items())
-            corpo = f"<table class='tabela'>{linhas}</table>"
-    else:
-        df = pd.DataFrame(resultado)
-        if tool == "consultar_gasto_por_periodo" and {"periodo", "valor_total"}.issubset(df.columns):
-            maximo = df["valor_total"].max() or 1
-            barras = "".join(
-                f"<div class='barra-linha'><span class='barra-rotulo'>{r['periodo']}</span>"
-                f"<div class='barra-fundo'><div class='barra-cheia' "
-                f"style='width:{(r['valor_total'] / maximo) * 100:.1f}%'></div></div>"
-                f"<span class='barra-valor'>R$ {r['valor_total']:.2f}</span></div>"
-                for _, r in df.iterrows()
-            )
-            corpo = f"<div class='grafico-barras'>{barras}</div>" + df.to_html(index=False, border=0, classes="tabela")
-        else:
-            corpo = df.to_html(index=False, border=0, classes="tabela")
+    corpo = _corpo_item_relatorio_viajai(tool, extra.get("resultado"))
 
     html = f"""<!doctype html>
 <html lang="pt-br">
 <head>
 <meta charset="utf-8">
 <title>{titulo} — Viaj.AI</title>
-<style>
-  body {{ font-family: Arial, Helvetica, sans-serif; background: #fff; color: #1a1a1a; margin: 32px; }}
-  header {{ border-bottom: 4px solid {LARANJA}; padding-bottom: 12px; margin-bottom: 24px; }}
-  h1 {{ color: {NAVY}; margin: 0 0 4px 0; font-size: 22px; }}
-  .meta {{ color: #666; font-size: 13px; }}
-  table.tabela {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
-  table.tabela th {{ background: {NAVY}; color: #fff; text-align: left; padding: 8px 10px; font-size: 13px; }}
-  table.tabela td {{ padding: 7px 10px; border-bottom: 1px solid #e5e5e5; font-size: 13px; }}
-  table.tabela tr:nth-child(even) td {{ background: #f7f7f9; }}
-  .grafico-barras {{ margin: 16px 0; }}
-  .barra-linha {{ display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }}
-  .barra-rotulo {{ width: 90px; font-size: 12px; color: #444; }}
-  .barra-fundo {{ flex: 1; background: #eee; border-radius: 3px; overflow: hidden; height: 16px; }}
-  .barra-cheia {{ background: {LARANJA}; height: 100%; }}
-  .barra-valor {{ width: 110px; font-size: 12px; text-align: right; color: #444; }}
-  footer {{ margin-top: 32px; font-size: 11px; color: #999; }}
-</style>
+<style>{_estilo_relatorio_viajai()}</style>
 </head>
 <body>
 <header>
@@ -313,6 +325,57 @@ def gerar_relatorio_html_viajai(extra):
     return html.encode("utf-8")
 
 
+def gerar_relatorio_analise_html_viajai(analise):
+    """Relatorio COMBINADO: o texto que a propria IA escreveu (a analise/
+    comparacao) + TODAS as tabelas que ela consultou pra chegar nessa
+    resposta (nao so' a ultima) - pedido do Rafael 03/09: "peço uma
+    comparacao especifica, a ia gera um dash... decido gerar o relatorio
+    mostrando esses dados estudados e trabalhados... pra nao correr o
+    risco de perder alguma informacao trabalhada". Guardado em
+    st.session_state.analise_ia_viajai, resetado a cada pergunta nova
+    (ver o loop de tool-use em pagina_chat) - reflete sempre a ULTIMA
+    troca da conversa, exportavel antes de perguntar outra coisa."""
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    usuario = st.session_state.get("usuario", "")
+    texto = (analise.get("texto") or "").strip()
+    itens = analise.get("itens") or []
+
+    # texto da IA e' texto puro (nao HTML) - so escapa os caracteres
+    # perigosos e quebra paragrafo por linha em branco, sem tentar
+    # renderizar markdown (** negrito ** etc fica literal mesmo, nao
+    # antecipando complexidade que ninguem pediu ainda).
+    import html as _html_stdlib
+    paragrafos = [p.strip() for p in texto.split("\n\n") if p.strip()]
+    narrativa = "".join(f"<p>{_html_stdlib.escape(p)}</p>" for p in paragrafos) or "<p>(sem texto)</p>"
+
+    secoes = ""
+    for item in itens:
+        titulo_item = TITULOS_RELATORIO_VIAJAI.get(item.get("tool", ""), item.get("tool", "Consulta"))
+        secoes += f"<h2>{titulo_item}</h2>" + _corpo_item_relatorio_viajai(item.get("tool", ""), item.get("resultado"))
+
+    if not secoes:
+        secoes = "<p>Nenhuma consulta associada a essa análise.</p>"
+
+    html = f"""<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>Análise do Assistente — Viaj.AI</title>
+<style>{_estilo_relatorio_viajai()}</style>
+</head>
+<body>
+<header>
+  <h1>Análise do Assistente Viaj.AI</h1>
+  <div class="meta">Gerado em {agora} por {usuario} — Viaj.AI {VERSAO_APP}</div>
+</header>
+<div class="narrativa">{narrativa}</div>
+{secoes}
+<footer>Viaj.AI — EnerMais. Dado extraído do sistema no momento da geração, nunca busca preço externo. Texto de análise gerado pelo assistente a partir desses dados — revise antes de usar como decisão final.</footer>
+</body>
+</html>"""
+    return html.encode("utf-8")
+
+
 def _botao_baixar_relatorio_html(extra, key):
     """Botao de download do relatorio empacotado (ver gerar_relatorio_html_viajai)."""
     tool = extra.get("tool", "relatorio")
@@ -321,6 +384,17 @@ def _botao_baixar_relatorio_html(extra, key):
         "📄 Baixar relatório desta consulta",
         data=gerar_relatorio_html_viajai(extra),
         file_name=nome_arquivo,
+        mime="text/html",
+        key=key,
+    )
+
+
+def _botao_baixar_relatorio_analise_html(analise, key):
+    """Botao de download do relatorio COMBINADO (ver gerar_relatorio_analise_html_viajai)."""
+    st.download_button(
+        "📄 Gerar relatório desta análise",
+        data=gerar_relatorio_analise_html_viajai(analise),
+        file_name="viajai_analise_assistente.html",
         mime="text/html",
         key=key,
     )
@@ -1875,6 +1949,35 @@ def pagina_chat(supabase):
                     else:
                         st.caption("Nenhum canteiro com latitude/longitude cadastrada ainda.")
 
+        # NOVO (v9.0, pedido do Rafael 03/09): quadro separado, embaixo do
+        # painel de cima, pra quando a pergunta em linguagem natural pedir uma
+        # analise/comparacao (a IA pode chamar mais de 1 ferramenta pra montar
+        # isso - o painel de cima so guarda a ULTIMA, esse guarda TODAS as
+        # consultas da pergunta + o texto que a IA escreveu em cima delas).
+        # Fica sempre disponivel (nao exige atalho nem forma especifica de
+        # pergunta) porque a ideia e' nao perder um raciocinio elaborado que a
+        # IA fizer, mesmo sem saber de antemao que forma ele vai tomar.
+        st.divider()
+        st.caption("🧩 Análise do assistente (última troca da conversa)")
+        analise = st.session_state.get("analise_ia_viajai")
+        if not analise or not analise.get("itens"):
+            st.info(
+                "Peça uma comparação ou análise mais elaborada no chat (ex.: "
+                "'compara o gasto de outubro com novembro') pra essa área juntar "
+                "os dados e o texto que a IA escreveu aqui, prontos pra virar "
+                "relatório."
+            )
+        else:
+            for _item in analise["itens"]:
+                _titulo_item = TITULOS_RELATORIO_VIAJAI.get(_item["tool"], _item["tool"])
+                st.markdown(f"**{_titulo_item}**")
+                _resultado_item = _item.get("resultado")
+                if isinstance(_resultado_item, list) and _resultado_item:
+                    st.dataframe(pd.DataFrame(_resultado_item), use_container_width=True, hide_index=True)
+                else:
+                    st.write(_resultado_item if _resultado_item else "(sem dado)")
+            _botao_baixar_relatorio_analise_html(analise, key="baixar_analise_ia")
+
     # chat_input FORA das colunas de proposito - so' assim o Streamlit fixa
     # ele no rodape da pagina (achado 03/09, confirmado na doc oficial:
     # dentro de st.columns ele nao fixa, vira widget comum). Fica largura
@@ -1914,6 +2017,15 @@ def pagina_chat(supabase):
                 # Limite de voltas de ferramenta (protecao contra loop
                 # longo demais em pergunta com muito calculo/data
                 # encadeado - achado 02/09).
+                #
+                # dash_multi_viajai (novo 03/09, pedido do Rafael: "peço uma
+                # comparacao especifica, a ia gera um dash... decido gerar o
+                # relatorio mostrando esses dados estudados") - zera a cada
+                # pergunta nova e ACUMULA todas as consultas dessa pergunta
+                # (nao so a ultima, como dash_extra_viajai faz) - permite um
+                # relatorio combinado quando a IA precisa de mais de 1 consulta
+                # pra montar uma comparacao/analise.
+                st.session_state.dash_multi_viajai = []
                 _voltas_ferramenta = 0
                 while resposta.stop_reason == "tool_use" and _voltas_ferramenta < 8:
                     _voltas_ferramenta += 1
@@ -1925,11 +2037,13 @@ def pagina_chat(supabase):
                             {"type": "tool_result", "tool_use_id": tu.id, "content": str(resultado)}
                         )
                         if tu.name in FERRAMENTAS_VISUAIS_VIAJAI:
-                            st.session_state.dash_extra_viajai = {
+                            _item_dash = {
                                 "tool": tu.name,
                                 "input": tu.input,
                                 "resultado": resultado,
                             }
+                            st.session_state.dash_extra_viajai = _item_dash
+                            st.session_state.dash_multi_viajai.append(_item_dash)
                     mensagens_api.append({"role": "assistant", "content": resposta.content})
                     mensagens_api.append({"role": "user", "content": resultados})
                     resposta = client.messages.create(
@@ -1967,6 +2081,15 @@ def pagina_chat(supabase):
                         texto_final = "Não consegui gerar uma resposta pra essa pergunta — tenta reformular."
             except Exception as e:
                 texto_final = f"Erro ao consultar o assistente: {e}"
+
+            # guarda a analise dessa troca (texto + todas as consultas que a IA
+            # fez pra chegar nela) pro quadro "Analise do assistente" e pro botao
+            # de relatorio combinado - reflete sempre a ULTIMA troca, exportavel
+            # antes de perguntar outra coisa (ver gerar_relatorio_analise_html_viajai).
+            st.session_state.analise_ia_viajai = {
+                "texto": texto_final,
+                "itens": st.session_state.get("dash_multi_viajai", []),
+            }
 
         st.session_state.mensagens_chat.append({"role": "assistant", "content": texto_final})
         supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "assistant", "p_conteudo": texto_final}).execute()
