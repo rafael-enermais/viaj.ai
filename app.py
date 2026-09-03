@@ -1,4 +1,4 @@
-# Viaj.AI — v10.0 (chat ganha ferramenta consultar_link_skyscanner - pedido do Rafael 03/09 'o link de busca de preço do skyscanner, o chat consegue utilizar?': o botao 'Ver no Skyscanner' so existia manual na tela Custo & Passagens, agora o Assistente tambem monta o mesmo link oficial (deep-link documentado, sem API key, sem preco nenhum vindo da IA) quando o usuario pedir busca de passagem em conversa) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v10.1 (fix: quadro 'Analise do assistente' mostrava 2x a mesma ferramenta quando a IA errava e corrigia sozinha na mesma pergunta - ex.: tentou 'Maringa' por extenso, deu erro, tentou de novo com codigo 'MGF' e acertou - as 2 tentativas apareciam juntas, confundindo o usuario. dash_multi_viajai agora e' filtrado antes de virar analise: erro da MESMA ferramenta que a propria IA corrigiu na mesma pergunta sai da lista, sem apagar 2 chamadas de ferramentas DIFERENTES que deram certo - ver _filtrar_dash_multi_viajai) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -57,7 +57,7 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v10.0"
+VERSAO_APP = "v10.1"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -184,6 +184,43 @@ def _link_skyscanner(origem_txt, destino_txt, data_ida_str):
         "data_ida": data_ida.isoformat(),
         "link_skyscanner": url,
     }
+
+
+def _filtrar_dash_multi_viajai(itens):
+    """Limpa a lista de chamadas de ferramenta acumuladas numa mesma
+    pergunta antes de virar 'Analise do assistente' (dash_multi_viajai):
+    quando a IA tenta de novo a MESMA ferramenta com a MESMA entrada,
+    fica so' a ultima tentativa; quando ela erra e depois acerta a MESMA
+    ferramenta com entrada DIFERENTE (ex.: tentou origem='Maringa' por
+    extenso, deu erro, tentou nome='MGF' e acertou), o erro que ela
+    mesma corrigiu sai da lista - sem apagar chamadas de ferramentas
+    DIFERENTES que deram certo (isso e' o cenario real de comparacao que
+    o quadro existe pra guardar, ex.: rota A x rota B, mes X x mes Y -
+    ai' os 2 ficam, porque sao 2 fontes de dado diferentes, nao um erro
+    corrigido)."""
+    vistos, ordem = {}, []
+    for item in itens:
+        chave = (item.get("tool"), str(item.get("input")))
+        if chave not in vistos:
+            ordem.append(chave)
+        vistos[chave] = item
+    dedup = [vistos[chave] for chave in ordem]
+
+    tem_sucesso_por_tool = set()
+    for item in dedup:
+        resultado = item.get("resultado")
+        eh_erro = isinstance(resultado, dict) and "erro" in resultado
+        if not eh_erro:
+            tem_sucesso_por_tool.add(item.get("tool"))
+
+    filtrados = []
+    for item in dedup:
+        resultado = item.get("resultado")
+        eh_erro = isinstance(resultado, dict) and "erro" in resultado
+        if eh_erro and item.get("tool") in tem_sucesso_por_tool:
+            continue  # erro que a propria IA corrigiu na mesma pergunta
+        filtrados.append(item)
+    return filtrados
 
 
 def _consultar_distancia_carro(origem, destino):
@@ -2163,7 +2200,7 @@ def pagina_chat(supabase):
             # antes de perguntar outra coisa (ver gerar_relatorio_analise_html_viajai).
             st.session_state.analise_ia_viajai = {
                 "texto": texto_final,
-                "itens": st.session_state.get("dash_multi_viajai", []),
+                "itens": _filtrar_dash_multi_viajai(st.session_state.get("dash_multi_viajai", [])),
             }
 
         st.session_state.mensagens_chat.append({"role": "assistant", "content": texto_final})
