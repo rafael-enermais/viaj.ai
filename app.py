@@ -1,4 +1,4 @@
-# Viaj.AI — v2.1 (fix: chat vinha mudo em pergunta complexa, max_tokens 1024->4096 + aviso em vez de bolha vazia) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v3.0 (Assistente com ACAO: propor lancamento rapido por linguagem natural, grava so' apos confirmacao humana) — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -1069,6 +1069,29 @@ TOOLS_VIAJAI = [
         "description": "Localizacao (cidade/UF/endereco/aeroporto mais proximo) dos canteiros que ja tem esse cadastro feito - nem todos tem ainda, e' alimentado aos poucos.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "propor_lancamento_rapido",
+        "description": (
+            "Prepara um lancamento rapido de compra de passagem (ex.: 'comprei 10 passagens do "
+            "Ceara pra SP por 3500') pra o usuario CONFIRMAR na tela antes de gravar. NUNCA grava "
+            "direto no banco - so' monta a proposta, que aparece no painel lateral com um botao "
+            "de confirmar. So' chame com origem, destino e valor_total certos (extraidos do que "
+            "o usuario disse); se faltar algum desses 3, pergunte antes de chamar a ferramenta."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origem": {"type": "string", "description": "Cidade/local de origem"},
+                "destino": {"type": "string", "description": "Cidade/local de destino"},
+                "valor_total": {"type": "number", "description": "Valor total pago (soma de todas as passagens desse lote)"},
+                "quantidade": {"type": "integer", "description": "Quantas passagens (padrao 1)"},
+                "modal": {"type": "string", "enum": ["aviao", "onibus", "carro", "taxi", "outro"], "description": "Padrao aviao"},
+                "data": {"type": "string", "description": "Data da compra, formato YYYY-MM-DD (padrao hoje)"},
+                "observacao": {"type": "string", "description": "Detalhe extra opcional (ex.: nome do fornecedor, se foi dito)"},
+            },
+            "required": ["origem", "destino", "valor_total"],
+        },
+    },
 ]
 
 
@@ -1104,6 +1127,32 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             r = supabase.rpc("viajai_listar_lancamentos_rapidos", {"p_limite": entrada.get("limite", 200)}).execute()
         elif nome == "consultar_localizacoes_canteiro":
             r = supabase.rpc("viajai_listar_localizacoes_canteiro").execute()
+        elif nome == "propor_lancamento_rapido":
+            # NUNCA grava aqui - so' monta a proposta pro usuario confirmar
+            # na tela (col_dash em pagina_chat). O INSERT de verdade so'
+            # acontece quando a pessoa clica "Confirmar e registrar", que
+            # chama viajai_registrar_lancamento_rapido direto (sem passar
+            # pela IA de novo) - pedido do Rafael 03/09: IA pode propor
+            # acao, mas quem executa e' sempre o humano clicando.
+            origem = (entrada.get("origem") or "").strip()
+            destino = (entrada.get("destino") or "").strip()
+            valor_total = entrada.get("valor_total")
+            if not origem or not destino or not valor_total:
+                return {"erro": "faltou origem, destino ou valor_total - pergunte pro usuario antes de propor de novo"}
+            st.session_state.acao_pendente_viajai = {
+                "tipo": "lancamento_rapido",
+                "origem": origem,
+                "destino": destino,
+                "valor_total": float(valor_total),
+                "quantidade": int(entrada.get("quantidade") or 1),
+                "modal": entrada.get("modal") or "aviao",
+                "data": entrada.get("data") or date.today().isoformat(),
+                "observacao": entrada.get("observacao") or "",
+            }
+            return {
+                "status": "proposta pronta, aguardando o usuario confirmar no painel lateral (nao foi gravado ainda)",
+                "resumo": f"{entrada.get('quantidade') or 1}x {origem} -> {destino}, R$ {float(valor_total):.2f}",
+            }
         else:
             return {"erro": "ferramenta desconhecida"}
         return r.data if r.data else []
@@ -1127,9 +1176,14 @@ def _montar_system_prompt_viajai(usuario_email):
         "HISTORICO ja registrado no proprio Viaj.AI, nunca do seu conhecimento geral sobre "
         "preco de passagem. Sem historico suficiente pra uma rota ou colaborador, diga isso "
         "em vez de chutar um valor plausivel.\n\n"
-        "Neste momento voce so CONSULTA — nao registra nada no banco (sem ferramenta de "
-        "escrita disponivel ainda). Se pedirem pra registrar compra/gasto, explique que "
-        "ainda nao registra por aqui e oriente a usar a tela 'Custo & Passagens'.\n\n"
+        "Voce PODE propor o registro de uma compra de passagem via "
+        "propor_lancamento_rapido quando o usuario contar que comprou (ex.: 'comprei 10 "
+        "passagens do Ceara pra SP por 3500') — mas isso NUNCA grava direto: so' monta uma "
+        "proposta que aparece pro usuario confirmar na tela antes de qualquer coisa ir pro "
+        "banco. So' chame essa ferramenta com origem, destino e valor_total certos; se "
+        "faltar algum, pergunte antes (nunca invente valor pra completar). Fora isso, voce "
+        "ainda so' CONSULTA — outras acoes (confirmar folga, registrar trecho/gasto de uma "
+        "folga especifica) nao tem ferramenta ainda, oriente a usar a tela correspondente.\n\n"
         "Guia de qual ferramenta usar:\n"
         "- quem esta de folga / precisa viajar / urgencia -> consultar_previsao_folgas.\n"
         "- pendencia de import / nao bateu no RH -> consultar_pendencias_import.\n"
@@ -1146,11 +1200,13 @@ def _montar_system_prompt_viajai(usuario_email):
         "- gasto por mes/periodo -> consultar_gasto_por_periodo.\n"
         "- lancamentos rapidos recentes -> consultar_lancamentos_rapidos.\n"
         "- onde fica um canteiro / aeroporto mais proximo -> consultar_localizacoes_canteiro "
-        "(nem todo canteiro tem cadastro ainda, avise se nao achar)."
+        "(nem todo canteiro tem cadastro ainda, avise se nao achar).\n"
+        "- usuario disse que COMPROU passagem(ns) -> propor_lancamento_rapido (so' com "
+        "origem/destino/valor certos; nunca grava sozinho, so' propoe pro usuario confirmar)."
     )
 
 
-FERRAMENTAS_VISUAIS_VIAJAI = {tool["name"] for tool in TOOLS_VIAJAI}
+FERRAMENTAS_VISUAIS_VIAJAI = {tool["name"] for tool in TOOLS_VIAJAI if tool["name"] != "propor_lancamento_rapido"}
 # Toda ferramenta de consulta pode virar tabela no painel lateral do chat;
 # a de localizacao de canteiro tambem tenta virar mapa (se tiver lat/lon
 # cadastrada) — pedido do Rafael 02/09: "gerar um dash interativo ao lado,
@@ -1162,8 +1218,9 @@ def pagina_chat(supabase):
     st.subheader("Assistente Viaj.AI")
     st.caption(
         "Converse em português sobre folgas, urgência, custo e histórico — só responde com "
-        "dado real do Viaj.AI (nunca busca preço na internet nem inventa número). Ainda não "
-        "registra nada por aqui, só consulta."
+        "dado real do Viaj.AI (nunca busca preço na internet nem inventa número). Já entende "
+        "'comprei N passagens de X pra Y' e prepara o lançamento, mas só grava depois que "
+        "você confirmar no painel ao lado — nunca escreve sozinho."
     )
 
     if not ANTHROPIC_API_KEY:
@@ -1273,6 +1330,55 @@ def pagina_chat(supabase):
             st.rerun()
 
     with col_dash:
+        acao = st.session_state.get("acao_pendente_viajai")
+        if acao and acao.get("tipo") == "lancamento_rapido":
+            # Confirmacao humana antes de gravar - pedido do Rafael 03/09:
+            # a IA so' PROPOE (ferramenta propor_lancamento_rapido nunca
+            # grava), quem executa de verdade e' sempre a pessoa clicando
+            # aqui. Campos vem preenchidos com o que a IA extraiu, mas dao
+            # pra corrigir antes de confirmar - camada extra de seguranca.
+            st.warning("Confirme antes de gravar — extraído da conversa, revise se estiver errado")
+            with st.form("form_confirmar_lancamento_ia"):
+                c_origem = st.text_input("Origem", value=acao["origem"])
+                c_destino = st.text_input("Destino", value=acao["destino"])
+                c_valor = st.number_input("Valor total (R$)", value=float(acao["valor_total"]), min_value=0.0, step=0.01)
+                c_qtd = st.number_input("Quantidade", value=int(acao["quantidade"]), min_value=1, step=1)
+                c_modal = st.selectbox(
+                    "Modal", ["aviao", "onibus", "carro", "taxi", "outro"],
+                    index=["aviao", "onibus", "carro", "taxi", "outro"].index(acao["modal"]) if acao["modal"] in ["aviao", "onibus", "carro", "taxi", "outro"] else 0,
+                )
+                try:
+                    _data_default = date.fromisoformat(acao["data"])
+                except (ValueError, TypeError):
+                    _data_default = date.today()
+                c_data = st.date_input("Data", value=_data_default)
+                c_obs = st.text_input("Observação", value=acao.get("observacao", ""))
+                col_ok, col_no = st.columns(2)
+                confirmar = col_ok.form_submit_button("✅ Confirmar e registrar", use_container_width=True)
+                cancelar = col_no.form_submit_button("Cancelar", use_container_width=True)
+
+            if confirmar:
+                supabase.rpc("viajai_registrar_lancamento_rapido", {
+                    "p_origem": c_origem, "p_destino": c_destino, "p_valor_total": c_valor,
+                    "p_quantidade": int(c_qtd), "p_modal": c_modal,
+                    "p_data": c_data.isoformat(), "p_observacao": c_obs or None,
+                }).execute()
+                del st.session_state.acao_pendente_viajai
+                st.session_state.mensagens_chat.append({
+                    "role": "assistant",
+                    "content": f"Registrado: {int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}.",
+                })
+                supabase.rpc("viajai_salvar_mensagem_chat", {
+                    "p_papel": "assistant",
+                    "p_conteudo": f"Registrado: {int(c_qtd)}x {c_origem} -> {c_destino}, R$ {c_valor:.2f}.",
+                }).execute()
+                st.success("Registrado.")
+                st.rerun()
+            elif cancelar:
+                del st.session_state.acao_pendente_viajai
+                st.rerun()
+            st.divider()
+
         st.caption("Painel — última consulta com dado")
         extra = st.session_state.get("dash_extra_viajai")
         if not extra:
