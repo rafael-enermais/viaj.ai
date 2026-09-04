@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v16.1"
+VERSAO_APP = "v16.2"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -2825,12 +2825,18 @@ def main():
         # rodape de versao/contato (pedido do Rafael 03/09: "anotar a versao
         # e contato pra manter atualizando conforme evolucao", ajustado 04/09
         # "ta grudado em cima" -> position:fixed manda pro rodape de verdade
-        # da sidebar, independente de quantos itens tem acima).
+        # da sidebar. Ajustado de novo 04/09 "ficou cruzado" - no Streamlit
+        # Cloud o proprio app injeta uma barra cinza no rodape da sidebar
+        # (com "Manage app"), que colidia com o texto numa linha so'. Subido
+        # pra bottom:45px (fica acima dessa barra) e quebrado em linhas
+        # empilhadas, largura estreita, pra caber na coluna cinza sem cruzar.
         st.markdown(
             f"""
-            <div style='position: fixed; bottom: 12px; font-size: 0.8rem;
-                        color: gray; padding-right: 8px;'>
-            {VERSAO_EXIBIDA} — dúvidas/manutenção: {CONTATO_SUPORTE}
+            <div style='position: fixed; bottom: 45px; left: 12px; max-width: 220px;
+                        font-size: 0.75rem; color: gray; line-height: 1.35;'>
+            <div>{VERSAO_EXIBIDA}</div>
+            <div>dúvidas/manutenção:</div>
+            <div>{CONTATO_SUPORTE}</div>
             </div>
             """,
             unsafe_allow_html=True,
