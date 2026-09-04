@@ -1,4 +1,4 @@
-# Viaj.AI — v14.0 (painel de Urgencias: folga sem passagem, preco fora do padrao, passagem pra revisar apos folga vendida/cancelada - pedido do Rafael 04/09 analisando o fluxo como gestor de logistica/compras. Ver v13.1 abaixo - pedido do Rafael 04/09 'parece que deu falha'. Ver v13.0 abaixo pra contexto completo da funcao - pedido do Rafael 04/09: 'implementa a central de ajuda e chat orientador' + 'deixa por enquanto formula simples, 120 por diaria mesmo, dps se precisar alteramos'. Fix de grant tambem aplicado via schema_v0.23 (RPC viajai_colaboradores_ativos rodava no SQL Editor mas quebrava no app - authenticated sem EXECUTE). Formula avancada de diaria (pernoite/arredondamento) continua em aberto, decisao explicita de simplificar agora — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v15.0 (reprocessar pendencias de import sem reupload - pedido do Rafael 04/09: RH DADOS e Viaj.AI subiram em paralelo, mesmos funcionarios nos 2 sistemas, nenhum populado por completo ainda; toda linha do RE090 pra colaborador que o RH ainda nao tem cadastrado cai em pendencia_import e nao tinha como 'tentar de novo' sem reupload manual do arquivo inteiro. Rejeitado de proposito: stub de colaborador em public.colaboradores (tabela do RH, nao do Viaj.AI - colidiria quando o RH subir de verdade pra essa mesma pessoa, e ficaria sem cargo/obra/canteiro corretos). Solucao: nova RPC viajai_reprocessar_pendencias_import (schema_v0.26) repete a mesma logica de casamento do v0.6 contra o estado ATUAL do RH, sem mudar FK/schema nenhum — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v14.1"
+VERSAO_APP = "v15.0"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -784,6 +784,28 @@ def pagina_importar_re090(supabase):
             key="editor_pendencias",
         )
         _botao_exportar_excel(df_pend.drop(columns=["resolvido"]), "viajai_pendencias.xlsx")
+        if st.button(
+            "🔄 Reprocessar pendências",
+            help=(
+                "Tenta casar de novo cada pendência contra o cadastro ATUAL "
+                "do RH — sem precisar reupload do arquivo. Útil quando o RH "
+                "ainda estava subindo/incompleto na hora do import original "
+                "e já cadastrou/ativou a pessoa depois."
+            ),
+        ):
+            r_reproc = supabase.rpc("viajai_reprocessar_pendencias_import", {}).execute()
+            resumo_reproc = r_reproc.data[0] if r_reproc.data else {}
+            reprocessadas = resumo_reproc.get("reprocessadas", 0)
+            ainda_pendentes = resumo_reproc.get("ainda_pendentes", 0)
+            if reprocessadas:
+                st.success(
+                    f"{reprocessadas} pendência(s) casaram agora e viraram folga "
+                    f"(ou já existiam e só limparam a fila). "
+                    f"{ainda_pendentes} continuam sem match no RH."
+                )
+            else:
+                st.info(f"Nenhuma pendência casou ainda ({ainda_pendentes} continuam sem match no RH).")
+            st.rerun()
         if st.button("Salvar pendências resolvidas"):
             marcadas = editado_pend[editado_pend["resolvido"] == True]  # noqa: E712
             if marcadas.empty:
