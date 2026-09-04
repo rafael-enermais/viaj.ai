@@ -1,4 +1,4 @@
-# Viaj.AI — v16.1 (nome provisorio no lancamento rapido - pedido do Rafael 04/09: 'se tiver varios sem nome nao da, ela nao consegue manter o controle, mas manter o RHDADOS como mae?'. Campo colaborador_nome_provisorio (schema_v0.28) - so rotulo de texto solto, SEM FK, RHDADOS continua unica fonte real de colaborador_id. Expander de atribuir (v16.0) agora sugere automaticamente o match certo comparando esse nome com quem esta ativo no RH — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v16.3 (central de ajuda + orientacao do chat atualizadas - pedido do Rafael 04/09: 'o chat tem e consegue usar ou orientar tb todas as funcoes?'. Resposta: orienta (Central de Ajuda + system prompt agora citam reprocessar pendencias e atribuir colaborador/nome provisorio), mas NAO executa essas 2 - ficam so' na tela de proposito (revisao visual/match). Ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v16.2"
+VERSAO_APP = "v16.3"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -2112,7 +2112,12 @@ def _montar_system_prompt_viajai(usuario_email):
         "vendida, cancelada) via propor_atualizar_folga - MESMA regra: nunca grava sozinho, so' "
         "propoe pro usuario confirmar no painel. Fora essas 2 propostas, voce ainda so' CONSULTA "
         "— outra acao (registrar trecho/gasto de uma folga especifica) nao tem ferramenta ainda, "
-        "oriente a usar a tela correspondente.\n\n"
+        "oriente a usar a tela correspondente. Duas acoes existem SO na tela, sem ferramenta de "
+        "chat pra executar (voce pode explicar que existem e orientar onde estao, mas nao tem "
+        "como fazer por voce): 'reprocessar pendencias de import' (botao na tela 'Importar "
+        "RE090', tenta casar de novo contra o RH atual sem precisar reupload) e 'atribuir "
+        "colaborador' a um lancamento rapido que ficou sem pessoa/so com nome provisorio "
+        "(expander na aba 'Lancamento rapido', dentro de 'Custo & Passagens').\n\n"
         "Se o usuario perguntar 'como funciona', 'o que voce consegue fazer', 'pra que serve "
         "essa tela/funcao' ou demonstrar duvida sobre o fluxo do Viaj.AI, EXPLIQUE em texto "
         "claro em vez de tentar chamar uma ferramenta - use como referencia o conteudo da aba "
@@ -2758,11 +2763,11 @@ def pagina_ajuda():
     st.markdown(
         """
 ### Fluxo geral
-1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco.
+1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco. Sem match com o RH vira pendência (não trava nada); tem botão **"Reprocessar pendências"** pra tentar casar de novo mais tarde, sem reupload, quando o RH cadastrar a pessoa.
 2. **Confirmar folgas** — confirma folga em status "prevista" (saida/retorno real), marca vendida ou cancelada.
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
-4. **Custo & Passagens** — lançamento e histórico de compra de passagem.
-5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada).
+4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Na aba "Lançamento rápido", dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome.
+5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada), e os últimos erros registrados pelo sistema.
 6. **Assistente** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
 
 ### O que o Assistente pode / não pode fazer
@@ -2776,10 +2781,13 @@ def pagina_ajuda():
 - Distância/tempo de carro (Google Maps)
 - Cálculo de diária de deslocamento (dias x valor fixo por tipo, fórmula simples)
 - Resumo de urgências (mesma lógica da aba "Urgências")
+- Pendências de import (lista, mas não reprocessa — isso é só na tela)
 
-**Não faz (ainda):**
+**Não faz (ainda) — só pela tela mesmo:**
 - Cadastrar colaborador novo — use a tela de cadastro do RH
 - Fórmula avançada de diária (pernoite, arredondamento) — usa fórmula simples por ora
+- Reprocessar pendências de import (botão na tela "Importar RE090")
+- Atribuir colaborador retroativo a um lançamento rápido (expander na aba "Lançamento rápido")
 
 ### Regra de ouro
 Você pede → o Assistente monta a proposta no painel lateral → **nada é gravado até você confirmar na tela**.
