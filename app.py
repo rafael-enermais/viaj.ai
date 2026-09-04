@@ -1,4 +1,4 @@
-# Viaj.AI — v13.1 (fix visual: cartao bonito pro calculo de diaria em vez de JSON cru - pedido do Rafael 04/09 'parece que deu falha'. Ver v13.0 abaixo pra contexto completo da funcao - pedido do Rafael 04/09: 'implementa a central de ajuda e chat orientador' + 'deixa por enquanto formula simples, 120 por diaria mesmo, dps se precisar alteramos'. Fix de grant tambem aplicado via schema_v0.23 (RPC viajai_colaboradores_ativos rodava no SQL Editor mas quebrava no app - authenticated sem EXECUTE). Formula avancada de diaria (pernoite/arredondamento) continua em aberto, decisao explicita de simplificar agora — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v14.0 (painel de Urgencias: folga sem passagem, preco fora do padrao, passagem pra revisar apos folga vendida/cancelada - pedido do Rafael 04/09 analisando o fluxo como gestor de logistica/compras. Ver v13.1 abaixo - pedido do Rafael 04/09 'parece que deu falha'. Ver v13.0 abaixo pra contexto completo da funcao - pedido do Rafael 04/09: 'implementa a central de ajuda e chat orientador' + 'deixa por enquanto formula simples, 120 por diaria mesmo, dps se precisar alteramos'. Fix de grant tambem aplicado via schema_v0.23 (RPC viajai_colaboradores_ativos rodava no SQL Editor mas quebrava no app - authenticated sem EXECUTE). Formula avancada de diaria (pernoite/arredondamento) continua em aberto, decisao explicita de simplificar agora — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -59,7 +59,7 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v13.1"
+VERSAO_APP = "v14.0"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -1724,6 +1724,19 @@ TOOLS_VIAJAI = [
             "required": ["tipo", "dias"],
         },
     },
+    {
+        "name": "consultar_urgencias",
+        "description": (
+            "Resumo das urgencias atuais do Viaj.AI: (1) folgas chegando nos "
+            "proximos dias SEM passagem lancada ainda, (2) lancamentos recentes "
+            "com preco fora do padrao historico da rota, (3) passagem ja "
+            "comprada vinculada a uma folga que depois virou vendida/cancelada "
+            "(candidata a revisar estorno). Use quando o usuario perguntar 'tem "
+            "alguma urgencia', 'o que precisa de atencao hoje', 'tem algo "
+            "pendente' etc. Mesma logica da aba 'Urgencias' do app."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -1919,6 +1932,17 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
                 "valor_total": float(valor_total),
                 "resumo": f"{int(dias)} dia(s) x valor fixo ({tipo}) = R$ {float(valor_total):.2f} (formula simples, sem pernoite ainda)",
             }
+        elif nome == "consultar_urgencias":
+            r_sem_passagem = supabase.rpc("viajai_folgas_sem_passagem", {"p_dias_janela": 10}).execute()
+            r_preco = supabase.rpc(
+                "viajai_alerta_preco_fora_padrao", {"p_dias_janela": 30, "p_desvio_pct": 0.4}
+            ).execute()
+            r_revisar = supabase.rpc("viajai_folga_passagem_para_revisar").execute()
+            return {
+                "folgas_sem_passagem": r_sem_passagem.data or [],
+                "precos_fora_padrao": r_preco.data or [],
+                "passagens_para_revisar": r_revisar.data or [],
+            }
         else:
             return {"erro": "ferramenta desconhecida"}
         return r.data if r.data else []
@@ -2024,7 +2048,10 @@ def _montar_system_prompt_viajai(usuario_email):
         "achado ou ambiguo, oriente a usar a tela 'Confirmar folgas' direto).\n"
         "- calcular quanto e' de diaria de deslocamento (dias x valor fixo) -> "
         "calcular_diaria_deslocamento (formula simples por decisao do Rafael 04/09/2026, "
-        "sem regra de pernoite/arredondamento ainda)."
+        "sem regra de pernoite/arredondamento ainda).\n"
+        "- tem urgencia / precisa de atencao / algo pendente -> consultar_urgencias "
+        "(folga sem passagem, preco fora do padrao, passagem pra revisar apos folga "
+        "vendida/cancelada - mesma logica da aba 'Urgencias')."
     )
 
 
@@ -2561,6 +2588,50 @@ def pagina_chat(supabase):
         supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "assistant", "p_conteudo": texto_final}).execute()
         st.rerun()
 
+def pagina_urgencias(supabase):
+    st.title("Urgências — Viaj.AI")
+    st.caption(
+        "Painel de alerta - pedido do Rafael 04/09 pensando como gestor de "
+        "logística/compras: nada aqui precisa de pergunta no chat, já vem "
+        "cruzado direto."
+    )
+
+    st.subheader("🚨 Folgas chegando sem passagem lançada")
+    try:
+        r1 = supabase.rpc("viajai_folgas_sem_passagem", {"p_dias_janela": 10}).execute()
+        if r1.data:
+            st.dataframe(pd.DataFrame(r1.data), use_container_width=True, hide_index=True)
+        else:
+            st.success("Nenhuma folga nos próximos 10 dias sem passagem lançada.")
+    except Exception as e:
+        st.error(f"Não consegui consultar (rodou o schema_v0.24 no Supabase?) — {e}")
+
+    st.divider()
+    st.subheader("💸 Preços fora do padrão da rota")
+    try:
+        r2 = supabase.rpc(
+            "viajai_alerta_preco_fora_padrao", {"p_dias_janela": 30, "p_desvio_pct": 0.4}
+        ).execute()
+        if r2.data:
+            st.dataframe(pd.DataFrame(r2.data), use_container_width=True, hide_index=True)
+        else:
+            st.success("Nenhum lançamento recente fora do padrão histórico da rota (desvio ≥ 40%).")
+    except Exception as e:
+        st.error(f"Não consegui consultar (rodou o schema_v0.24 no Supabase?) — {e}")
+
+    st.divider()
+    st.subheader("↩️ Passagem vinculada a folga vendida/cancelada")
+    st.caption("Candidatas a revisar estorno/crédito com a companhia.")
+    try:
+        r3 = supabase.rpc("viajai_folga_passagem_para_revisar").execute()
+        if r3.data:
+            st.dataframe(pd.DataFrame(r3.data), use_container_width=True, hide_index=True)
+        else:
+            st.success("Nenhuma passagem vinculada a folga vendida/cancelada pendente de revisão.")
+    except Exception as e:
+        st.error(f"Não consegui consultar (rodou o schema_v0.24 no Supabase?) — {e}")
+
+
 def pagina_ajuda():
     st.title("Central de Ajuda — Viaj.AI")
     st.markdown(
@@ -2570,7 +2641,8 @@ def pagina_ajuda():
 2. **Confirmar folgas** — confirma folga em status "prevista" (saida/retorno real), marca vendida ou cancelada.
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
 4. **Custo & Passagens** — lançamento e histórico de compra de passagem.
-5. **Assistente** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
+5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada).
+6. **Assistente** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
 
 ### O que o Assistente pode / não pode fazer
 **Pode (com sua confirmação antes de gravar):**
@@ -2582,6 +2654,7 @@ def pagina_ajuda():
 - Link do Skyscanner e ClickBus (nunca inventa preço)
 - Distância/tempo de carro (Google Maps)
 - Cálculo de diária de deslocamento (dias x valor fixo por tipo, fórmula simples)
+- Resumo de urgências (mesma lógica da aba "Urgências")
 
 **Não faz (ainda):**
 - Cadastrar colaborador novo — use a tela de cadastro do RH
@@ -2622,7 +2695,7 @@ def main():
         st.write(f"Logado como: {st.session_state.usuario}")
         pagina = st.radio(
             "Navegação",
-            ["Importar RE090", "Confirmar folgas", "Previsão de folgas", "Custo & Passagens", "Central de Ajuda", "Assistente"],
+            ["Importar RE090", "Confirmar folgas", "Urgências", "Previsão de folgas", "Custo & Passagens", "Central de Ajuda", "Assistente"],
         )
         if st.button("Sair"):
             supabase.auth.sign_out()
@@ -2637,6 +2710,8 @@ def main():
         pagina_importar_re090(supabase)
     elif pagina == "Confirmar folgas":
         pagina_confirmar_folgas(supabase)
+    elif pagina == "Urgências":
+        pagina_urgencias(supabase)
     elif pagina == "Previsão de folgas":
         pagina_previsao(supabase)
     elif pagina == "Custo & Passagens":
