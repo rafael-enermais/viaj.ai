@@ -1,4 +1,4 @@
-# Viaj.AI — v12.0 (chat ganha ferramenta consultar_link_clickbus - pedido do Rafael 03/09 'ideia e' ter mais viagens de onibus, conseguimos adicionar o clickbus como adicionamos o skyscanner?'. MESMO principio do skyscanner: nunca preco, so' link real pra conferir manualmente. ClickBus nao documenta um deep-link oficial tipo o do Skyscanner - formato confirmado por observacao direta dos links reais publicados na home deles em 03/09 (nao chutado), sem parametro de data confirmado (por isso a ferramenta nao tenta incluir data, so' cidade+UF) — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v13.0 (central de ajuda + calculo simples de diaria de deslocamento - pedido do Rafael 04/09: 'implementa a central de ajuda e chat orientador' + 'deixa por enquanto formula simples, 120 por diaria mesmo, dps se precisar alteramos'. Fix de grant tambem aplicado via schema_v0.23 (RPC viajai_colaboradores_ativos rodava no SQL Editor mas quebrava no app - authenticated sem EXECUTE). Formula avancada de diaria (pernoite/arredondamento) continua em aberto, decisao explicita de simplificar agora — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -59,7 +59,7 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v12.0"
+VERSAO_APP = "v13.0"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -1686,6 +1686,30 @@ TOOLS_VIAJAI = [
             "required": ["colaborador_nome", "status_novo"],
         },
     },
+    {
+        "name": "calcular_diaria_deslocamento",
+        "description": (
+            "Calcula o valor total de diaria de deslocamento: dias informados x valor fixo "
+            "por tipo (formula simples, decisao do Rafael 04/09/2026 - SEM regra de pernoite "
+            "ou arredondamento ainda, isso fica pra depois se precisar). Use quando o usuario "
+            "pedir pra 'calcular a diaria', 'quanto custa o deslocamento de X dias' etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {
+                    "type": "string",
+                    "enum": ["folga", "admissao_demissao_deslocamento"],
+                    "description": "'folga' = deslocamento do ciclo normal (ida/volta de folga); 'admissao_demissao_deslocamento' = deslocamento de admissao/demissao.",
+                },
+                "dias": {
+                    "type": "integer",
+                    "description": "Total de dias de deslocamento (soma ida + volta, se for o caso).",
+                },
+            },
+            "required": ["tipo", "dias"],
+        },
+    },
 ]
 
 
@@ -1863,6 +1887,24 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
                 ),
                 "resumo": f"{folga_alvo.get('nome')}: prevista -> {status_novo}",
             }
+        elif nome == "calcular_diaria_deslocamento":
+            tipo = (entrada.get("tipo") or "").strip()
+            dias = entrada.get("dias")
+            if tipo not in ("folga", "admissao_demissao_deslocamento") or not dias:
+                return {"erro": "faltou tipo (folga ou admissao_demissao_deslocamento) ou dias"}
+            r_diaria = supabase.rpc(
+                "viajai_calcular_diaria_simples",
+                {"p_tipo": tipo, "p_dias": int(dias)},
+            ).execute()
+            valor_total = r_diaria.data
+            if valor_total is None:
+                return {"erro": f"tipo '{tipo}' nao encontrado na config de diaria"}
+            return {
+                "tipo": tipo,
+                "dias": int(dias),
+                "valor_total": float(valor_total),
+                "resumo": f"{int(dias)} dia(s) x valor fixo ({tipo}) = R$ {float(valor_total):.2f} (formula simples, sem pernoite ainda)",
+            }
         else:
             return {"erro": "ferramenta desconhecida"}
         return r.data if r.data else []
@@ -1928,6 +1970,11 @@ def _montar_system_prompt_viajai(usuario_email):
         "propoe pro usuario confirmar no painel. Fora essas 2 propostas, voce ainda so' CONSULTA "
         "— outra acao (registrar trecho/gasto de uma folga especifica) nao tem ferramenta ainda, "
         "oriente a usar a tela correspondente.\n\n"
+        "Se o usuario perguntar 'como funciona', 'o que voce consegue fazer', 'pra que serve "
+        "essa tela/funcao' ou demonstrar duvida sobre o fluxo do Viaj.AI, EXPLIQUE em texto "
+        "claro em vez de tentar chamar uma ferramenta - use como referencia o conteudo da aba "
+        "'Central de Ajuda' do proprio app (fluxo geral, o que cada tela faz, o que voce pode/"
+        "nao pode fazer, frases-modelo, mensagens comuns que nao sao erro).\n\n"
         "Guia de qual ferramenta usar:\n"
         "- quem esta de folga / precisa viajar / urgencia -> consultar_previsao_folgas.\n"
         "- pendencia de import / nao bateu no RH -> consultar_pendencias_import.\n"
@@ -1960,7 +2007,10 @@ def _montar_system_prompt_viajai(usuario_email):
         "cidade + UF de origem e destino; devolve so' link, NUNCA preco; nao suporta data "
         "especifica, avise que a data e' escolhida na pagina do ClickBus).\n"
         "propor_atualizar_folga (so' propoe, nunca grava sozinho; se der erro de nome nao "
-        "achado ou ambiguo, oriente a usar a tela 'Confirmar folgas' direto)."
+        "achado ou ambiguo, oriente a usar a tela 'Confirmar folgas' direto).\n"
+        "- calcular quanto e' de diaria de deslocamento (dias x valor fixo) -> "
+        "calcular_diaria_deslocamento (formula simples por decisao do Rafael 04/09/2026, "
+        "sem regra de pernoite/arredondamento ainda)."
     )
 
 
@@ -2493,6 +2543,51 @@ def pagina_chat(supabase):
         supabase.rpc("viajai_salvar_mensagem_chat", {"p_papel": "assistant", "p_conteudo": texto_final}).execute()
         st.rerun()
 
+def pagina_ajuda():
+    st.title("Central de Ajuda — Viaj.AI")
+    st.markdown(
+        """
+### Fluxo geral
+1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco.
+2. **Confirmar folgas** — confirma folga em status "prevista" (saida/retorno real), marca vendida ou cancelada.
+3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
+4. **Custo & Passagens** — lançamento e histórico de compra de passagem.
+5. **Assistente** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
+
+### O que o Assistente pode / não pode fazer
+**Pode (com sua confirmação antes de gravar):**
+- Lançar rapidamente uma compra de passagem
+- Propor atualização de status de folga (saída/retorno real, vendida, cancelada)
+
+**Só consulta (nunca grava):**
+- Previsão de folga e de gasto
+- Link do Skyscanner e ClickBus (nunca inventa preço)
+- Distância/tempo de carro (Google Maps)
+- Cálculo de diária de deslocamento (dias x valor fixo por tipo, fórmula simples)
+
+**Não faz (ainda):**
+- Cadastrar colaborador novo — use a tela de cadastro do RH
+- Fórmula avançada de diária (pernoite, arredondamento) — usa fórmula simples por ora
+
+### Regra de ouro
+Você pede → o Assistente monta a proposta no painel lateral → **nada é gravado até você confirmar na tela**.
+Passagem comprada e folga são registros independentes — uma não abre/fecha a outra.
+
+### Frases-modelo
+- "Lança uma passagem de R$[valor], [origem] pra [destino], colaborador [nome], dia [data]"
+- "[Nome] retornou de folga dia [data], atualiza pra mim"
+- "[Nome] vendeu a folga" / "cancela a folga do [nome]"
+- "Qual a previsão de gasto do [colaborador/canteiro/obra]?"
+- "Calcula a diária de deslocamento do [nome], [N] dias, tipo [folga/admissão-demissão]"
+- "Me dá o link do ClickBus/Skyscanner pra rota [origem]-[destino]"
+
+### Mensagens que confundem mas não são erro
+- **"Não achei folga com status 'prevista'"** → normal, não existe folga aberta esperando confirmação pra esse colaborador agora. Vá em "Confirmar folgas" direto.
+- **Quadro vermelho / "postgrest.exceptions.APIError"** → esse sim é erro real de sistema. Reporte a hora exata pro suporte.
+        """
+    )
+
+
 def main():
     if "sessao" not in st.session_state:
         tela_login()
@@ -2509,7 +2604,7 @@ def main():
         st.write(f"Logado como: {st.session_state.usuario}")
         pagina = st.radio(
             "Navegação",
-            ["Importar RE090", "Confirmar folgas", "Previsão de folgas", "Custo & Passagens", "Assistente"],
+            ["Importar RE090", "Confirmar folgas", "Previsão de folgas", "Custo & Passagens", "Central de Ajuda", "Assistente"],
         )
         if st.button("Sair"):
             supabase.auth.sign_out()
@@ -2528,6 +2623,8 @@ def main():
         pagina_previsao(supabase)
     elif pagina == "Custo & Passagens":
         pagina_custo_passagens(supabase)
+    elif pagina == "Central de Ajuda":
+        pagina_ajuda()
     elif pagina == "Assistente":
         pagina_chat(supabase)
 
