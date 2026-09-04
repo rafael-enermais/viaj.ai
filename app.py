@@ -1,4 +1,4 @@
-# Viaj.AI — v13.0 (central de ajuda + calculo simples de diaria de deslocamento - pedido do Rafael 04/09: 'implementa a central de ajuda e chat orientador' + 'deixa por enquanto formula simples, 120 por diaria mesmo, dps se precisar alteramos'. Fix de grant tambem aplicado via schema_v0.23 (RPC viajai_colaboradores_ativos rodava no SQL Editor mas quebrava no app - authenticated sem EXECUTE). Formula avancada de diaria (pernoite/arredondamento) continua em aberto, decisao explicita de simplificar agora — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v13.1 (fix visual: cartao bonito pro calculo de diaria em vez de JSON cru - pedido do Rafael 04/09 'parece que deu falha'. Ver v13.0 abaixo pra contexto completo da funcao - pedido do Rafael 04/09: 'implementa a central de ajuda e chat orientador' + 'deixa por enquanto formula simples, 120 por diaria mesmo, dps se precisar alteramos'. Fix de grant tambem aplicado via schema_v0.23 (RPC viajai_colaboradores_ativos rodava no SQL Editor mas quebrava no app - authenticated sem EXECUTE). Formula avancada de diaria (pernoite/arredondamento) continua em aberto, decisao explicita de simplificar agora — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -59,7 +59,7 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v13.0"
+VERSAO_APP = "v13.1"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -350,6 +350,7 @@ TITULOS_RELATORIO_VIAJAI = {
     "consultar_distancia_carro": "Distância de carro (Google Maps)",
     "consultar_link_skyscanner": "Link de busca (Skyscanner)",
     "consultar_link_clickbus": "Link de busca (ClickBus)",
+    "calcular_diaria_deslocamento": "Cálculo de diária de deslocamento",
 }
 
 # Atalhos de relatorio rapido (pedido do Rafael 03/09: "botaozinho que pede
@@ -358,6 +359,19 @@ TITULOS_RELATORIO_VIAJAI = {
 # custo de token, resposta instantanea, determinístico. O chat em
 # linguagem natural continua funcionando igual pra tudo que nao tiver
 # atalho ou pra pergunta mais especifica/combinada.
+def _renderizar_calculo_diaria(resultado):
+    """Cartao bonito pro resultado (dict unico, nao lista) de
+    calcular_diaria_deslocamento - pedido do Rafael 04/09: 'JSON cru parece
+    que deu falha'."""
+    valor = resultado.get("valor_total")
+    st.metric(
+        "Diária de deslocamento",
+        f"R$ {float(valor):.2f}" if valor is not None else "—",
+    )
+    if resultado.get("resumo"):
+        st.caption(resultado["resumo"])
+
+
 REPORTS_RAPIDOS_VIAJAI = [
     {"label": "📊 Previsão de folgas", "tool": "consultar_previsao_folgas", "input": {}},
     {"label": "💰 Previsão de gasto", "tool": "consultar_previsao_gasto_colaborador", "input": {}},
@@ -2382,7 +2396,9 @@ def pagina_chat(supabase):
             )
         else:
             resultado = extra.get("resultado")
-            if not isinstance(resultado, list) or not resultado:
+            if extra.get("tool") == "calcular_diaria_deslocamento" and isinstance(resultado, dict):
+                _renderizar_calculo_diaria(resultado)
+            elif not isinstance(resultado, list) or not resultado:
                 st.write(resultado if resultado else "(sem dado pra essa consulta)")
             else:
                 df_dash = pd.DataFrame(resultado)
@@ -2420,7 +2436,9 @@ def pagina_chat(supabase):
                 _titulo_item = TITULOS_RELATORIO_VIAJAI.get(_item["tool"], _item["tool"])
                 st.markdown(f"**{_titulo_item}**")
                 _resultado_item = _item.get("resultado")
-                if isinstance(_resultado_item, list) and _resultado_item:
+                if _item["tool"] == "calcular_diaria_deslocamento" and isinstance(_resultado_item, dict):
+                    _renderizar_calculo_diaria(_resultado_item)
+                elif isinstance(_resultado_item, list) and _resultado_item:
                     st.dataframe(pd.DataFrame(_resultado_item), use_container_width=True, hide_index=True)
                 else:
                     st.write(_resultado_item if _resultado_item else "(sem dado)")
