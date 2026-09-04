@@ -1,4 +1,4 @@
-# Viaj.AI — v16.0 (atribuir colaborador retroativamente a lancamento rapido - mesma pergunta do Rafael 04/09 sobre RH subir depois: lancamento 'solto' (sem colaborador, pq a pessoa ainda nao estava ativa no RH) so tinha registrar/listar/apagar, faltava editar. Nova RPC viajai_atribuir_colaborador_lancamento_rapido (schema_v0.27) + expander novo na aba Lancamento rapido, so aparece quando ha lancamento sem colaborador — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v16.1 (nome provisorio no lancamento rapido - pedido do Rafael 04/09: 'se tiver varios sem nome nao da, ela nao consegue manter o controle, mas manter o RHDADOS como mae?'. Campo colaborador_nome_provisorio (schema_v0.28) - so rotulo de texto solto, SEM FK, RHDADOS continua unica fonte real de colaborador_id. Expander de atribuir (v16.0) agora sugere automaticamente o match certo comparando esse nome com quem esta ativo no RH — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v16.0"
+VERSAO_APP = "v16.1"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1404,6 +1404,15 @@ def pagina_custo_passagens(supabase):
             data_lr = st.date_input("Data da compra", value=date.today(), key="lr_data")
             obs_lr = st.text_input("Observação (opcional)", key="lr_obs")
             colab_lr = st.selectbox("Colaborador (opcional)", _colabs_opcoes_lr, key="lr_colab")
+            nome_prov_lr = st.text_input(
+                "Nome (se a pessoa ainda não aparece no RH)",
+                key="lr_nome_provisorio",
+                help=(
+                    "Só pra organizar/identificar depois — NÃO cria colaborador "
+                    "nenhum, é rótulo solto. Ignorado se você já escolheu um "
+                    "colaborador real acima."
+                ),
+            )
             enviar_lr = st.form_submit_button("Registrar")
 
         if enviar_lr:
@@ -1420,6 +1429,7 @@ def pagina_custo_passagens(supabase):
                         "p_data": data_lr.isoformat() if data_lr else None,
                         "p_observacao": obs_lr or None,
                         "p_colaborador_id": _colabs_por_nome_lr.get(colab_lr),
+                        "p_colaborador_nome_provisorio": nome_prov_lr or None,
                     }).execute()
                     st.success("Lançamento registrado.")
                     st.rerun()
@@ -1448,14 +1458,33 @@ def pagina_custo_passagens(supabase):
                     _sem_colab["_rotulo"] = _sem_colab.apply(
                         lambda r: (
                             f"#{r['id']} — {r['origem']} -> {r['destino']} — R$ {r['valor_total']:.2f}"
-                            f" — {r.get('observacao') or ''}"
+                            + (f" — (provisório: {r['colaborador_nome_provisorio']})" if r.get("colaborador_nome_provisorio") else " — sem nome")
+                            + f" — {r.get('observacao') or ''}"
                         ),
                         axis=1,
                     )
                     rotulo_atribuir = st.selectbox("Qual lançamento?", _sem_colab["_rotulo"], key="lr_atribuir_select")
-                    id_atribuir = int(_sem_colab.loc[_sem_colab["_rotulo"] == rotulo_atribuir, "id"].iloc[0])
+                    _linha_atribuir = _sem_colab.loc[_sem_colab["_rotulo"] == rotulo_atribuir].iloc[0]
+                    id_atribuir = int(_linha_atribuir["id"])
+                    # sugestao automatica: casa o nome provisorio (se tiver) contra
+                    # os nomes ativos no RH, sem acento/maiuscula - pedido do Rafael
+                    # 04/09 (nao travar E nao perder controle com varios "sem nome")
+                    _opcoes_atribuir = ["— selecione —"] + list(_colabs_por_nome_lr.keys())
+                    _nome_prov_atual = (_linha_atribuir.get("colaborador_nome_provisorio") or "").strip()
+                    _indice_sugerido = 0
+                    if _nome_prov_atual:
+                        _alvo = unicodedata.normalize("NFKD", _nome_prov_atual.upper()).encode("ascii", "ignore").decode()
+                        for _i, _opt in enumerate(_opcoes_atribuir):
+                            if _opt == "— selecione —":
+                                continue
+                            _opt_norm = unicodedata.normalize("NFKD", _opt.upper()).encode("ascii", "ignore").decode()
+                            if _opt_norm == _alvo:
+                                _indice_sugerido = _i
+                                break
+                    if _indice_sugerido:
+                        st.caption(f"💡 Sugestão pelo nome provisório: **{_opcoes_atribuir[_indice_sugerido]}**")
                     colab_atribuir = st.selectbox(
-                        "Colaborador", ["— selecione —"] + list(_colabs_por_nome_lr.keys()), key="lr_atribuir_colab"
+                        "Colaborador", _opcoes_atribuir, index=_indice_sugerido, key="lr_atribuir_colab"
                     )
                     if st.button("Atribuir", key="lr_atribuir_btn"):
                         if colab_atribuir == "— selecione —":
@@ -1478,6 +1507,7 @@ def pagina_custo_passagens(supabase):
                     lambda r: (
                         f"#{r['id']} — {r['origem']} -> {r['destino']} — R$ {r['valor_total']:.2f}"
                         + (f" — {r['colaborador_nome']}" if r.get("colaborador_nome") else "")
+                        + (f" — (provisório: {r['colaborador_nome_provisorio']})" if r.get("colaborador_nome_provisorio") else "")
                         + f" — {r.get('observacao') or ''}"
                     ),
                     axis=1,
