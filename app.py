@@ -1,4 +1,4 @@
-# Viaj.AI — v15.0 (reprocessar pendencias de import sem reupload - pedido do Rafael 04/09: RH DADOS e Viaj.AI subiram em paralelo, mesmos funcionarios nos 2 sistemas, nenhum populado por completo ainda; toda linha do RE090 pra colaborador que o RH ainda nao tem cadastrado cai em pendencia_import e nao tinha como 'tentar de novo' sem reupload manual do arquivo inteiro. Rejeitado de proposito: stub de colaborador em public.colaboradores (tabela do RH, nao do Viaj.AI - colidiria quando o RH subir de verdade pra essa mesma pessoa, e ficaria sem cargo/obra/canteiro corretos). Solucao: nova RPC viajai_reprocessar_pendencias_import (schema_v0.26) repete a mesma logica de casamento do v0.6 contra o estado ATUAL do RH, sem mudar FK/schema nenhum — ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v16.0 (atribuir colaborador retroativamente a lancamento rapido - mesma pergunta do Rafael 04/09 sobre RH subir depois: lancamento 'solto' (sem colaborador, pq a pessoa ainda nao estava ativa no RH) so tinha registrar/listar/apagar, faltava editar. Nova RPC viajai_atribuir_colaborador_lancamento_rapido (schema_v0.27) + expander novo na aba Lancamento rapido, so aparece quando ha lancamento sem colaborador — ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v15.0"
+VERSAO_APP = "v16.0"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1433,6 +1433,43 @@ def pagina_custo_passagens(supabase):
             df_lanc = pd.DataFrame(lancs.data)
             st.dataframe(df_lanc, hide_index=True, use_container_width=True)
             _botao_exportar_excel(df_lanc, "viajai_lancamentos_rapidos.xlsx")
+
+            # Atribuir colaborador retroativamente (RH subiu/ativou a pessoa
+            # depois do lançamento "solto") - pedido do Rafael 04/09, RPC
+            # nova em schema_v0.27 (viajai_atribuir_colaborador_lancamento_rapido).
+            _sem_colab = df_lanc[df_lanc["colaborador_nome"].isna()] if "colaborador_nome" in df_lanc.columns else df_lanc.iloc[0:0]
+            if not _sem_colab.empty:
+                with st.expander("👤 Atribuir colaborador a um lançamento (RH subiu depois)"):
+                    st.caption(
+                        "Pra lançamento registrado sem colaborador porque a pessoa "
+                        "ainda não estava ativa no RH na hora — anexa agora que já está."
+                    )
+                    _sem_colab = _sem_colab.copy()
+                    _sem_colab["_rotulo"] = _sem_colab.apply(
+                        lambda r: (
+                            f"#{r['id']} — {r['origem']} -> {r['destino']} — R$ {r['valor_total']:.2f}"
+                            f" — {r.get('observacao') or ''}"
+                        ),
+                        axis=1,
+                    )
+                    rotulo_atribuir = st.selectbox("Qual lançamento?", _sem_colab["_rotulo"], key="lr_atribuir_select")
+                    id_atribuir = int(_sem_colab.loc[_sem_colab["_rotulo"] == rotulo_atribuir, "id"].iloc[0])
+                    colab_atribuir = st.selectbox(
+                        "Colaborador", ["— selecione —"] + list(_colabs_por_nome_lr.keys()), key="lr_atribuir_colab"
+                    )
+                    if st.button("Atribuir", key="lr_atribuir_btn"):
+                        if colab_atribuir == "— selecione —":
+                            st.info("Escolhe um colaborador.")
+                        else:
+                            try:
+                                supabase.rpc("viajai_atribuir_colaborador_lancamento_rapido", {
+                                    "p_id": id_atribuir,
+                                    "p_colaborador_id": _colabs_por_nome_lr[colab_atribuir],
+                                }).execute()
+                                st.success("Colaborador atribuído.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Não consegui atribuir (rodou o schema_v0.27 no Supabase?): {e}")
 
             # Apagar (teste ou registro errado) - pedido do Rafael 03/09,
             # RPC nova em schema_v0.16 (viajai_apagar_lancamento_rapido).
