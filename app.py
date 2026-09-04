@@ -59,7 +59,14 @@ MODEL_ID = "claude-sonnet-5"
 # "anotar a versao e contato pra manter atualizando conforme evolucao") -
 # atualizar VERSAO_APP a cada bump de versao (mesmo numero do comentario
 # no topo do arquivo), pra sempre bater com o que esta rodando de fato.
-VERSAO_APP = "v14.0"
+# VERSAO_APP = controle INTERNO de build, usado no git/vault/versoes.md -
+# nao muda de significado. VERSAO_EXIBIDA = o que aparece pro usuario
+# final (Amanda etc) - pedido do Rafael 04/09: "ainda nao entreguei,
+# melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
+# depois disso o Rafael decide quando essa string passa a acompanhar
+# VERSAO_APP de novo.
+VERSAO_APP = "v14.1"
+VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
@@ -462,7 +469,7 @@ def gerar_relatorio_html_viajai(extra):
 <body>
 <header>
   <h1>{titulo}</h1>
-  <div class="meta">Gerado em {agora} por {usuario} — Viaj.AI {VERSAO_APP}</div>
+  <div class="meta">Gerado em {agora} por {usuario} — Viaj.AI {VERSAO_EXIBIDA}</div>
 </header>
 {corpo}
 <footer>Viaj.AI — EnerMais. Dado extraído do sistema no momento da geração, nunca busca preço externo.</footer>
@@ -512,7 +519,7 @@ def gerar_relatorio_analise_html_viajai(analise):
 <body>
 <header>
   <h1>Análise do Assistente Viaj.AI</h1>
-  <div class="meta">Gerado em {agora} por {usuario} — Viaj.AI {VERSAO_APP}</div>
+  <div class="meta">Gerado em {agora} por {usuario} — Viaj.AI {VERSAO_EXIBIDA}</div>
 </header>
 <div class="narrativa">{narrativa}</div>
 {secoes}
@@ -1947,6 +1954,15 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             return {"erro": "ferramenta desconhecida"}
         return r.data if r.data else []
     except Exception as e:
+        try:
+            supabase.rpc("viajai_registrar_log_erro", {
+                "p_contexto": "chat_tool",
+                "p_ferramenta": nome,
+                "p_entrada": entrada,
+                "p_mensagem_erro": str(e),
+            }).execute()
+        except Exception:
+            pass  # log e' best-effort - nunca pode quebrar a resposta pro usuario
         return {"erro": str(e)}
 
 
@@ -2631,6 +2647,22 @@ def pagina_urgencias(supabase):
     except Exception as e:
         st.error(f"Não consegui consultar (rodou o schema_v0.24 no Supabase?) — {e}")
 
+    st.divider()
+    st.subheader("🪵 Últimos erros registrados")
+    st.caption(
+        "Erros do Assistente (chat) ficam gravados aqui desde o schema_v0.25 - "
+        "pedido do Rafael 04/09 pensando em uso por terceiros: se algo der "
+        "errado, dá pra investigar depois em vez de perder o erro na hora."
+    )
+    try:
+        r4 = supabase.rpc("viajai_listar_log_erro", {"p_limite": 20}).execute()
+        if r4.data:
+            st.dataframe(pd.DataFrame(r4.data), use_container_width=True, hide_index=True)
+        else:
+            st.success("Nenhum erro registrado.")
+    except Exception as e:
+        st.error(f"Não consegui consultar (rodou o schema_v0.25 no Supabase?) — {e}")
+
 
 def pagina_ajuda():
     st.title("Central de Ajuda — Viaj.AI")
@@ -2702,9 +2734,18 @@ def main():
             del st.session_state.sessao
             st.rerun()
         # rodape de versao/contato (pedido do Rafael 03/09: "anotar a versao
-        # e contato pra manter atualizando conforme evolucao") - atualizar
-        # VERSAO_APP no topo do arquivo a cada bump, aparece aqui sozinho.
-        st.caption(f"{VERSAO_APP} — dúvidas/manutenção: {CONTATO_SUPORTE}")
+        # e contato pra manter atualizando conforme evolucao", ajustado 04/09
+        # "ta grudado em cima" -> position:fixed manda pro rodape de verdade
+        # da sidebar, independente de quantos itens tem acima).
+        st.markdown(
+            f"""
+            <div style='position: fixed; bottom: 12px; font-size: 0.8rem;
+                        color: gray; padding-right: 8px;'>
+            {VERSAO_EXIBIDA} — dúvidas/manutenção: {CONTATO_SUPORTE}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if pagina == "Importar RE090":
         pagina_importar_re090(supabase)
