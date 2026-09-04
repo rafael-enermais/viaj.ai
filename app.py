@@ -1,4 +1,4 @@
-# Viaj.AI — v16.3 (central de ajuda + orientacao do chat atualizadas - pedido do Rafael 04/09: 'o chat tem e consegue usar ou orientar tb todas as funcoes?'. Resposta: orienta (Central de Ajuda + system prompt agora citam reprocessar pendencias e atribuir colaborador/nome provisorio), mas NAO executa essas 2 - ficam so' na tela de proposito (revisao visual/match). Ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v16.4 (UX/linguagem - pedido do Rafael 04/09 com 6 prints: destacar colunas editaveis com icone (confirmar folgas/previsao/pendencias), tirar jargao tecnico ('override' -> 'forcar nivel manual'), orientacao de fluxo/proximo passo em varias telas, caption por secao em Urgencias, correcao do codigo IATA de Maringa (MGF), mensagem amigavel + aviso de indisponibilidade temporaria no calculo por carro (Google Maps billing), caption explicando a aba 'Por folga'. Ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v16.3"
+VERSAO_APP = "v16.4"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -139,6 +139,7 @@ _IATA_CIDADES = {
     "sao luis": "SLZ", "são luís": "SLZ", "cuiaba": "CGB", "cuiabá": "CGB",
     "campo grande": "CGR", "goiania": "GYN", "goiânia": "GYN",
     "florianopolis": "FLN", "florianópolis": "FLN",
+    "maringa": "MGF", "maringá": "MGF",
 }
 
 
@@ -306,6 +307,8 @@ def _consultar_distancia_carro(origem, destino):
             timeout=10,
         )
         dado = resp.json()
+        if dado.get("status") == "REQUEST_DENIED":
+            return {"erro": "Estimativa por carro temporariamente indisponível (configuração de faturamento do Google Maps pendente) — use o Skyscanner/ClickBus normalmente enquanto isso."}
         if dado.get("status") != "OK":
             return {"erro": f"Google Maps recusou a consulta ({dado.get('status')}): {dado.get('error_message', '')}"}
         linha = dado.get("rows", [{}])[0]
@@ -775,7 +778,7 @@ def pagina_importar_re090(supabase):
             df_pend,
             column_config={
                 "resolvido": st.column_config.CheckboxColumn(
-                    "Resolvida", help="Marca e clica em Salvar embaixo pra tirar da lista."
+                    "✏️ Resolvida", help="Marca e clica em Salvar embaixo pra tirar da lista."
                 ),
             },
             disabled=[c for c in df_pend.columns if c not in ("resolvido",)],
@@ -842,6 +845,14 @@ def pagina_confirmar_folgas(supabase):
         "mudou, preenche data real se for o caso, e clica em Salvar no "
         "final — quem ficar em 'prevista' não é tocado."
     )
+    st.info(
+        "✏️ Só as colunas com lápis são editáveis: **Status novo**, "
+        "**Saída real**, **Retorno real** e **Motivo**. O resto (Situação, "
+        "Urgência, Nome, Obra, Canteiro, datas previstas) é só pra consulta. "
+        "Depois de salvar aqui, se a folga precisava de passagem, ela some "
+        "de 'Confirmar folgas' mas pode continuar aparecendo em **Urgências** "
+        "até você lançar a compra em **Custo & Passagens**."
+    )
 
     previstas = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 300}).execute()
     if not previstas.data:
@@ -883,28 +894,28 @@ def pagina_confirmar_folgas(supabase):
                 "status_novo", "data_saida_real", "data_retorno_real", "motivo_venda",
             ],
             column_config={
-                "situacao": st.column_config.TextColumn("Situação", disabled=True),
+                "situacao": st.column_config.TextColumn("🔒 Situação", disabled=True),
                 "urgencia": st.column_config.TextColumn(
-                    "Urgência", disabled=True,
-                    help="Mesmo cálculo da tela Previsão de folgas — pra editar o override, vai lá.",
+                    "🔒 Urgência", disabled=True,
+                    help="Calculado automaticamente. Pra forçar um nível diferente pra 1 pessoa, use a tela 'Previsão de folgas'.",
                 ),
-                "nome": st.column_config.TextColumn("Nome", disabled=True),
-                "obra_nome": st.column_config.TextColumn("Obra", disabled=True),
-                "canteiro_nome": st.column_config.TextColumn("Canteiro", disabled=True),
-                "data_saida_prevista": st.column_config.DateColumn("Saída prevista", disabled=True),
-                "data_retorno_prevista": st.column_config.DateColumn("Retorno previsto", disabled=True),
+                "nome": st.column_config.TextColumn("🔒 Nome", disabled=True),
+                "obra_nome": st.column_config.TextColumn("🔒 Obra", disabled=True),
+                "canteiro_nome": st.column_config.TextColumn("🔒 Canteiro", disabled=True),
+                "data_saida_prevista": st.column_config.DateColumn("🔒 Saída prevista", disabled=True),
+                "data_retorno_prevista": st.column_config.DateColumn("🔒 Retorno previsto", disabled=True),
                 "status_novo": st.column_config.SelectboxColumn(
-                    "Status novo", options=_STATUS_OPCOES, required=True,
+                    "✏️ Status novo", options=_STATUS_OPCOES, required=True,
                     help="Deixa 'prevista' pra não mexer nessa linha.",
                 ),
                 "data_saida_real": st.column_config.DateColumn(
-                    "Saída real", help="Preenche se marcou 'em_andamento' ou 'realizada'."
+                    "✏️ Saída real", help="Preenche se marcou 'em_andamento' ou 'realizada'."
                 ),
                 "data_retorno_real": st.column_config.DateColumn(
-                    "Retorno real", help="Preenche se marcou 'realizada'."
+                    "✏️ Retorno real", help="Preenche se marcou 'realizada'."
                 ),
                 "motivo_venda": st.column_config.TextColumn(
-                    "Motivo (se vendida)", help="Opcional, só faz sentido se marcou 'vendida'."
+                    "✏️ Motivo (se vendida)", help="Opcional, só faz sentido se marcou 'vendida'."
                 ),
             },
             hide_index=True,
@@ -915,7 +926,6 @@ def pagina_confirmar_folgas(supabase):
             base.drop(columns=["status_novo", "data_saida_real", "data_retorno_real", "motivo_venda"]),
             "viajai_confirmar_folgas.xlsx",
         )
-        st.caption("'Urgência' é só leitura aqui — pra travar manual (override), usa a tela 'Previsão de folgas'.")
 
         if st.button("Salvar alterações", type="primary"):
             mudou = editado[editado["status_novo"] != "prevista"]
@@ -1071,27 +1081,29 @@ def pagina_previsao(supabase):
     outras = [c for c in df.columns if c not in colunas_principais and c not in colunas_ocultas]
     df = df[colunas_principais + outras]
 
-    st.caption(
-        "'Urgência' (coluna calculada) muda sozinha conforme os dias passam. "
-        "Pra travar manualmente pra 1 pessoa (ex.: sabe que ela vai atrasar "
-        "por outro motivo), muda 'Override manual' e clica Salvar embaixo — "
-        "'(automático)' volta a deixar o cálculo decidir sozinho."
+    st.info(
+        "✏️ Só a coluna **Forçar nível (manual)** é editável aqui — o resto "
+        "é só consulta. 'Urgência'/'Situação' mudam sozinhas conforme os dias "
+        "passam; pra travar manualmente pra 1 pessoa (ex.: sabe que ela vai "
+        "atrasar por outro motivo), escolha um nível em 'Forçar nível (manual)' "
+        "e clique Salvar embaixo — '(automático)' devolve o controle pro cálculo."
     )
     editado = st.data_editor(
         df,
         column_config={
             "override_manual": st.column_config.SelectboxColumn(
-                "Override manual",
+                "✏️ Forçar nível (manual)",
                 options=[_UO_AUTOMATICO, "critico", "atencao", "normal"],
                 required=True,
+                help="'(automático)' deixa o cálculo decidir sozinho. Escolher um nível trava esse nível pra essa pessoa até você voltar pra '(automático)'.",
             ),
             "previsao_gasto": st.column_config.NumberColumn(
-                "Previsão de gasto",
+                "🔒 Previsão de gasto",
                 format="R$ %.2f",
                 help="Média do custo histórico (da própria pessoa; sem isso, do canteiro; sem isso, da obra) — ver coluna 'Base'.",
             ),
             "base_previsao": st.column_config.TextColumn(
-                "Base", help="De onde veio a previsão: colaborador, canteiro, obra ou sem_dado (nunca registrado nada ainda)."
+                "🔒 Base", help="De onde veio a previsão: colaborador, canteiro, obra ou sem_dado (nunca registrado nada ainda)."
             ),
         },
         disabled=[c for c in df.columns if c != "override_manual"],
@@ -1102,10 +1114,10 @@ def pagina_previsao(supabase):
     )
     _botao_exportar_excel(df.drop(columns=["override_manual"]), "viajai_previsao_folgas.xlsx")
 
-    if st.button("Salvar overrides de urgência"):
+    if st.button("Salvar ajustes de urgência"):
         mudou = editado[editado["override_manual"] != df["override_manual"]]
         if mudou.empty:
-            st.info("Nenhum override mudou — nada pra salvar.")
+            st.info("Nenhum ajuste mudou — nada pra salvar.")
         else:
             erros = 0
             for _, linha in mudou.iterrows():
@@ -1121,10 +1133,10 @@ def pagina_previsao(supabase):
                         }).execute()
                 except Exception as e:
                     erros += 1
-                    st.error(f"Erro ao salvar override de {linha['nome']}: {e}")
+                    st.error(f"Erro ao salvar ajuste de urgência de {linha['nome']}: {e}")
             sucesso = len(mudou) - erros
             if sucesso:
-                st.success(f"{sucesso} override(s) salvo(s).")
+                st.success(f"{sucesso} ajuste(s) de urgência salvo(s).")
             st.rerun()
 
     st.divider()
@@ -1211,7 +1223,12 @@ def pagina_custo_passagens(supabase):
         else:
             st.caption("Preenche origem e destino (cidade ou código) pra habilitar o link.")
 
-    with st.expander("🚗 Estimar por carro (Google Maps)"):
+    with st.expander("🚗 Estimar por carro (Google Maps) *"):
+        st.caption(
+            "* Depende de uma configuração de faturamento no Google Cloud — "
+            "pode ficar temporariamente indisponível. Use Skyscanner/ClickBus "
+            "normalmente enquanto isso."
+        )
         if not GOOGLE_MAPS_API_KEY:
             st.caption(
                 "Chave do Google Maps ainda não configurada (Secrets do Streamlit Cloud: "
@@ -1257,6 +1274,12 @@ def pagina_custo_passagens(supabase):
     aba_folga, aba_rapido = st.tabs(["Por folga", "Lançamento rápido"])
 
     with aba_folga:
+        st.caption(
+            "Essa aba é pra quem JÁ tem folga confirmada/realizada/vendida/"
+            "cancelada (feito em 'Confirmar folgas') — é só pra anexar "
+            "trechos e gastos extras a essa folga, não dá pra editar a folga "
+            "em si aqui. Folga ainda 'prevista' não aparece na lista abaixo."
+        )
         folgas_resp = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 500}).execute()
         if not folgas_resp.data:
             st.caption(
@@ -2707,6 +2730,12 @@ def pagina_urgencias(supabase):
     )
 
     st.subheader("🚨 Folgas chegando sem passagem lançada")
+    st.caption(
+        "O que fazer: lance a passagem em **Custo & Passagens** (aba "
+        "'Lançamento rápido' ou 'Por folga'). Assim que existir um "
+        "lançamento pra essa pessoa, ela some sozinha dessa lista — não "
+        "tem botão de resolver aqui."
+    )
     try:
         r1 = supabase.rpc("viajai_folgas_sem_passagem", {"p_dias_janela": 10}).execute()
         if r1.data:
@@ -2718,6 +2747,11 @@ def pagina_urgencias(supabase):
 
     st.divider()
     st.subheader("💸 Preços fora do padrão da rota")
+    st.caption(
+        "Só informativo — não tem 'resolver' aqui. Serve pra revisar se o "
+        "valor faz sentido (erro de digitação, rota atípica) e, se for o "
+        "caso, corrigir o lançamento em Custo & Passagens."
+    )
     try:
         r2 = supabase.rpc(
             "viajai_alerta_preco_fora_padrao", {"p_dias_janela": 30, "p_desvio_pct": 0.4}
@@ -2731,7 +2765,12 @@ def pagina_urgencias(supabase):
 
     st.divider()
     st.subheader("↩️ Passagem vinculada a folga vendida/cancelada")
-    st.caption("Candidatas a revisar estorno/crédito com a companhia.")
+    st.caption(
+        "Candidatas a revisar estorno/crédito com a companhia. Ainda não "
+        "tem botão de 'resolvido' aqui — o item só some da lista se você "
+        "corrigir/apagar o lançamento em Custo & Passagens (isso é uma "
+        "melhoria futura em aberto, não construída ainda)."
+    )
     try:
         r3 = supabase.rpc("viajai_folga_passagem_para_revisar").execute()
         if r3.data:
@@ -2746,7 +2785,8 @@ def pagina_urgencias(supabase):
     st.caption(
         "Erros do Assistente (chat) ficam gravados aqui desde o schema_v0.25 - "
         "pedido do Rafael 04/09 pensando em uso por terceiros: se algo der "
-        "errado, dá pra investigar depois em vez de perder o erro na hora."
+        "errado, dá pra investigar depois em vez de perder o erro na hora. "
+        "Não precisa 'resolver' nada aqui — é só histórico."
     )
     try:
         r4 = supabase.rpc("viajai_listar_log_erro", {"p_limite": 20}).execute()
