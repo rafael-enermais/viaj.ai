@@ -1,4 +1,20 @@
-# Viaj.AI — v18.2 (fix: celulas vazias mostravam o texto literal 'None' em varias tabelas - achado por Claude 08/09 revisando o app antes da entrega pra Amanda, mesma classe do bug do JSON da v18.1. Causa: Streamlit nao tem placeholder default vazio pra valor nulo em st.dataframe/st.data_editor (issue streamlit/streamlit#7360, corrigido via parametro 'placeholder' adicionado na propria lib). Fix: placeholder="" adicionado nas 23 chamadas de st.dataframe/st.data_editor do arquivo (Confirmar folgas, Custo & Passagens, Urgencias, historico etc.) - nenhuma mudanca de logica/dado, so' exibicao. Ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v18.3 (fix: mensagens de sucesso/aviso sumiam depois de clicar em
+# varios botoes - achado por Claude 08/09 testando upload real de RE090 e
+# "Forcar nivel manual" com o Rafael. Causa: o padrao st.success(...) seguido
+# na sequencia por st.rerun() faz o rerun reiniciar o script ANTES do
+# navegador desenhar aquele frame - a mensagem nunca chegava a aparecer,
+# mesmo a acao tendo funcionado e gravado certo no banco (confirmado nos 2
+# casos testados ao vivo: "Reprocessar pendencias" e "Salvar ajustes de
+# urgencia" - dado persistiu, so' o feedback visual sumia). Fix: helper
+# _flash()/_renderizar_flash() guarda a mensagem na sessao antes do rerun e
+# mostra na leva seguinte (chamada 1x no topo do main()). Corrigidos os 16
+# call sites reais (achados via ast, nao regex, pra nao pegar st.success
+# que NAO precede rerun): Importar RE090 (reprocessar pendencias, salvar
+# pendencias resolvidas), Confirmar folgas, Previsao de folgas (salvar
+# ajustes de urgencia), Custo & Passagens (trecho, reembolso, gasto,
+# lancamento, atribuir colaborador, apagar - 8 pontos), Urgencias (marcar
+# revisada). Nenhuma mudanca de logica/dado, so' exibicao. Ver
+# 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +81,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v18.2"
+VERSAO_APP = "v18.3"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -589,6 +605,29 @@ def _botao_baixar_relatorio_analise_html(analise, key):
     )
 
 
+def _flash(tipo, texto):
+    """Guarda uma mensagem de feedback pra mostrar DEPOIS do st.rerun().
+
+    Achado em teste ao vivo 08/09 (Claude, autorizado pelo Rafael a
+    corrigir): varios botoes chamavam st.success(...)/st.info(...) e, na
+    linha seguinte, st.rerun() - o rerun reinicia o script ANTES do
+    navegador chegar a desenhar aquele frame, entao a mensagem nunca
+    aparecia (a acao funcionava e gravava certo no banco, so' o feedback
+    visual sumia). Padrao corrigido: guarda a mensagem na sessao antes do
+    rerun, _renderizar_flash() (chamada 1x no topo do main(), antes de
+    despachar pra pagina) mostra e limpa na leva seguinte.
+    """
+    st.session_state.setdefault("_flash_queue", []).append((tipo, texto))
+
+
+def _renderizar_flash():
+    fila = st.session_state.pop("_flash_queue", None)
+    if not fila:
+        return
+    for tipo, texto in fila:
+        getattr(st, tipo)(texto)
+
+
 def get_client() -> Client:
     if "supabase_client" not in st.session_state:
         st.session_state.supabase_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -794,7 +833,7 @@ def pagina_importar_re090(supabase):
                         "viajai_reverter_import_batch", {"p_batch_id": lote["id"]}
                     ).execute()
                     r = rev.data[0] if rev.data else {}
-                    st.success(
+                    _flash("success",
                         f"Revertido: {r.get('folgas_removidas', 0)} folga(s) removida(s), "
                         f"{r.get('folgas_puladas', 0)} pulada(s) (já tinham sido mexidas), "
                         f"{r.get('pendencias_removidas', 0)} pendência(s) removida(s)."
@@ -841,13 +880,13 @@ def pagina_importar_re090(supabase):
             reprocessadas = resumo_reproc.get("reprocessadas", 0)
             ainda_pendentes = resumo_reproc.get("ainda_pendentes", 0)
             if reprocessadas:
-                st.success(
+                _flash("success",
                     f"{reprocessadas} pendência(s) casaram agora e viraram folga "
                     f"(ou já existiam e só limparam a fila). "
                     f"{ainda_pendentes} continuam sem match no RH."
                 )
             else:
-                st.info(f"Nenhuma pendência casou ainda ({ainda_pendentes} continuam sem match no RH).")
+                _flash("info", f"Nenhuma pendência casou ainda ({ainda_pendentes} continuam sem match no RH).")
             st.rerun()
         if st.button("Salvar pendências resolvidas"):
             marcadas = editado_pend[editado_pend["resolvido"] == True]  # noqa: E712
@@ -866,7 +905,7 @@ def pagina_importar_re090(supabase):
                         st.error(f"Erro ao resolver pendência {linha['id']}: {e}")
                 sucesso = len(marcadas) - erros
                 if sucesso:
-                    st.success(f"{sucesso} pendência(s) marcada(s) como resolvida(s).")
+                    _flash("success", f"{sucesso} pendência(s) marcada(s) como resolvida(s).")
                 st.rerun()
     else:
         st.caption("Nenhuma pendência em aberto.")
@@ -999,7 +1038,7 @@ def pagina_confirmar_folgas(supabase):
                         st.error(f"Erro ao salvar {linha['nome']}: {e}")
                 sucesso = len(mudou) - erros
                 if sucesso:
-                    st.success(f"{sucesso} folga(s) atualizada(s).")
+                    _flash("success", f"{sucesso} folga(s) atualizada(s).")
                 st.rerun()
 
         st.caption(f"{len(previstas.data)} folga(s) prevista(s) aguardando confirmação.")
@@ -1188,7 +1227,7 @@ def pagina_previsao(supabase):
                     st.error(f"Erro ao salvar ajuste de urgência de {linha['nome']}: {e}")
             sucesso = len(mudou) - erros
             if sucesso:
-                st.success(f"{sucesso} ajuste(s) de urgência salvo(s).")
+                _flash("success", f"{sucesso} ajuste(s) de urgência salvo(s).")
             st.rerun()
 
     st.divider()
@@ -1446,7 +1485,7 @@ def pagina_custo_passagens(supabase):
                             "p_duracao_horas": duracao_t or None,
                             "p_data_compra": data_compra_t.isoformat() if data_compra_t else None,
                         }).execute()
-                        st.success("Trecho adicionado.")
+                        _flash("success", "Trecho adicionado.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao adicionar trecho: {e}")
@@ -1490,7 +1529,7 @@ def pagina_custo_passagens(supabase):
                                     "p_trecho_id": int(_linha_reemb["trecho_id"]),
                                     "p_reembolsado": False,
                                 }).execute()
-                                st.success("Reembolso desfeito.")
+                                _flash("success", "Reembolso desfeito.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Erro ao desfazer reembolso: {e}")
@@ -1513,7 +1552,7 @@ def pagina_custo_passagens(supabase):
                                     "p_data_reembolso": data_reemb.isoformat() if data_reemb else None,
                                     "p_observacao": obs_reemb or None,
                                 }).execute()
-                                st.success("Marcado como reembolsado.")
+                                _flash("success", "Marcado como reembolsado.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Erro ao marcar reembolso: {e}")
@@ -1539,7 +1578,7 @@ def pagina_custo_passagens(supabase):
                             "p_data": data_g.isoformat() if data_g else None,
                             "p_observacao": obs_g or None,
                         }).execute()
-                        st.success("Gasto registrado.")
+                        _flash("success", "Gasto registrado.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao registrar gasto: {e}")
@@ -1601,7 +1640,7 @@ def pagina_custo_passagens(supabase):
                         "p_colaborador_id": _colabs_por_nome_lr.get(colab_lr),
                         "p_colaborador_nome_provisorio": nome_prov_lr or None,
                     }).execute()
-                    st.success("Lançamento registrado.")
+                    _flash("success", "Lançamento registrado.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao registrar lançamento: {e}")
@@ -1665,7 +1704,7 @@ def pagina_custo_passagens(supabase):
                                     "p_id": id_atribuir,
                                     "p_colaborador_id": _colabs_por_nome_lr[colab_atribuir],
                                 }).execute()
-                                st.success("Colaborador atribuído.")
+                                _flash("success", "Colaborador atribuído.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Não consegui atribuir (rodou o schema_v0.27 no Supabase?): {e}")
@@ -1687,7 +1726,7 @@ def pagina_custo_passagens(supabase):
                 if st.button("🗑️ Apagar este lançamento", key="lr_apagar_btn"):
                     try:
                         supabase.rpc("viajai_apagar_lancamento_rapido", {"p_id": id_apagar}).execute()
-                        st.success("Apagado.")
+                        _flash("success", "Apagado.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Não consegui apagar (rodou o schema_v0.16 no Supabase?): {e}")
@@ -2668,7 +2707,7 @@ def pagina_chat(supabase):
                         supabase.rpc("viajai_salvar_mensagem_chat", {
                             "p_papel": "assistant", "p_conteudo": _resumo_folga_txt,
                         }).execute()
-                        st.success(_resumo_folga_txt)
+                        _flash("success", _resumo_folga_txt)
                         st.rerun()
                     elif cancelar_folga:
                         st.session_state.propostas_pendentes_viajai = [
@@ -2687,7 +2726,7 @@ def pagina_chat(supabase):
                         st.session_state.registros_recentes_viajai = [
                             r for r in st.session_state.registros_recentes_viajai if r["id"] != _reg["id"]
                         ]
-                        st.success("Desfeito.")
+                        _flash("success", "Desfeito.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Não consegui desfazer (rodou o schema_v0.16 no Supabase?): {e}")
@@ -2966,7 +3005,7 @@ def pagina_urgencias(supabase):
                         "p_resultado": resultado_rev,
                         "p_observacao": obs_rev or None,
                     }).execute()
-                    st.success("Marcada como revisada — guardada no histórico.")
+                    _flash("success", "Marcada como revisada — guardada no histórico.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao marcar como revisada: {e}")
@@ -3103,6 +3142,8 @@ def main():
             """,
             unsafe_allow_html=True,
         )
+
+    _renderizar_flash()
 
     if pagina == "Importar RE090":
         pagina_importar_re090(supabase)
