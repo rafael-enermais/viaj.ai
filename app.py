@@ -1,4 +1,4 @@
-# Viaj.AI — v16.4 (UX/linguagem - pedido do Rafael 04/09 com 6 prints: destacar colunas editaveis com icone (confirmar folgas/previsao/pendencias), tirar jargao tecnico ('override' -> 'forcar nivel manual'), orientacao de fluxo/proximo passo em varias telas, caption por secao em Urgencias, correcao do codigo IATA de Maringa (MGF), mensagem amigavel + aviso de indisponibilidade temporaria no calculo por carro (Google Maps billing), caption explicando a aba 'Por folga'. Ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v16.5 (fluidez de fluxo - pedido do Rafael 08/09: 'todo o fluxo tem que estar fluido', revisao completa. Orientacao de proximo passo agora em TODAS as telas com tabela (Importar RE090, Confirmar folgas, Previsao); explicado o que cada status de folga significa (prevista/confirmada/em_andamento/realizada/vendida/cancelada) na tela e na Central de Ajuda; achado e corrigido texto desatualizado em Previsao > 'Desvio de planejamento' que dizia 'custo ainda nao tem tela pra registrar' (falso - Custo & Passagens ja tem isso, com versao MAIS completa da mesma tabela) - agora aponta pra la em vez de duplicar/confundir. Ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v16.4"
+VERSAO_APP = "v16.5"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -729,6 +729,13 @@ def pagina_importar_re090(supabase):
                 msg += f", {duplicadas} duplicada(s) (já existia folga prevista pra essa pessoa nessa mesma data — ignorada, não criou de novo)"
             st.success(msg + ".")
             st.dataframe(resultados)
+            if criadas:
+                st.info(
+                    "➡️ Próximo passo: as folgas criadas já aparecem em **Previsão de folgas** "
+                    "(quando cada uma vai chegar) e, mais perto da data, em **Confirmar folgas** "
+                    "(pra registrar saída/retorno real). Se houve pendência, use o botão "
+                    "'🔄 Reprocessar pendências' embaixo assim que o RH cadastrar a pessoa."
+                )
 
     st.divider()
     st.subheader("Histórico de imports")
@@ -851,7 +858,13 @@ def pagina_confirmar_folgas(supabase):
         "Urgência, Nome, Obra, Canteiro, datas previstas) é só pra consulta. "
         "Depois de salvar aqui, se a folga precisava de passagem, ela some "
         "de 'Confirmar folgas' mas pode continuar aparecendo em **Urgências** "
-        "até você lançar a compra em **Custo & Passagens**."
+        "até você lançar a compra em **Custo & Passagens**.\n\n"
+        "O que cada status significa: **confirmada** = já tem data marcada/"
+        "passagem definida, mas a pessoa ainda não saiu; **em_andamento** = "
+        "já saiu, ainda não voltou (preenche Saída real); **realizada** = "
+        "já voltou (preenche Saída real e Retorno real); **vendida** = não "
+        "saiu, converteu os dias em pagamento e continua trabalhando; "
+        "**cancelada** = a folga não vai mais acontecer."
     )
 
     previstas = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 300}).execute()
@@ -977,6 +990,12 @@ def pagina_previsao(supabase):
         "Calculado ao vivo: colaborador ativo no RH + última folga conhecida "
         "no Viaj.AI. Sem histórico ainda = sem previsão (precisa de ao menos "
         "1 folga registrada, manual ou via import)."
+    )
+    st.caption(
+        "➡️ Pra que serve: só olhar/planejar (não edita a folga aqui). Quando "
+        "a data se aproxima, vá em **Confirmar folgas** pra registrar saída/"
+        "retorno real. Os mesmos alertas de urgência aparecem resumidos na "
+        "aba **Urgências**."
     )
     resp = supabase.rpc("viajai_previsao_folgas").execute()
     if not resp.data:
@@ -1142,10 +1161,12 @@ def pagina_previsao(supabase):
     st.divider()
     st.subheader("Desvio de planejamento")
     st.caption(
-        "Prevista x real: só datas por enquanto (custo em R$ ainda não tem "
-        "tela pra registrar — viagem/trecho/gasto é o próximo bloco grande, "
-        "ver 00-handoff). Positivo = atrasou em relação ao previsto; "
-        "negativo = antecipou."
+        "Prevista x real, só datas. Positivo = atrasou em relação ao "
+        "previsto; negativo = antecipou. Quer ver isso já somado com o "
+        "custo em R$ (passagem + gastos) da mesma folga? Essa versão mais "
+        "completa está em **Custo & Passagens > Por folga > Comparativo de "
+        "custo x desvio de planejamento** — essa tabela aqui é só o atalho "
+        "rápido de datas."
     )
     desvio = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 200}).execute()
     if desvio.data:
@@ -2804,7 +2825,7 @@ def pagina_ajuda():
         """
 ### Fluxo geral
 1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco. Sem match com o RH vira pendência (não trava nada); tem botão **"Reprocessar pendências"** pra tentar casar de novo mais tarde, sem reupload, quando o RH cadastrar a pessoa.
-2. **Confirmar folgas** — confirma folga em status "prevista" (saida/retorno real), marca vendida ou cancelada.
+2. **Confirmar folgas** — confirma folga em status "prevista", passando pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada".
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
 4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Na aba "Lançamento rápido", dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome.
 5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada), e os últimos erros registrados pelo sistema.
