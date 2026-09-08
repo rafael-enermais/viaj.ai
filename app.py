@@ -1,4 +1,4 @@
-# Viaj.AI — v18.1 (fix: consultar_urgencias mostrava JSON cru no painel do chat - achado pelo Rafael 08/09, 'parece erro de principiante'. Causa: e' a UNICA ferramenta que devolve um dict de 3 LISTAS (nao 1 lista de linhas nem 1 dict escalar como calcular_diaria_deslocamento, que ja tinha cartao proprio desde a v13.1) - o renderizador do painel so' tratava esses 2 casos, o resto caia no fallback st.write() que no Streamlit mostra dict como JSON navegavel. Fix: _renderizar_urgencias_dash() novo, com o mesmo tratamento em 'Painel - ultima consulta', '🧭 Analise do assistente' e no relatorio HTML exportado (_corpo_item_relatorio_viajai) - as 3 secoes (folgas sem passagem/precos fora do padrao/passagens pra revisar) viram 3 tabelas rotuladas em vez de 1 JSON. Correcao pontual - ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v18.2 (fix: celulas vazias mostravam o texto literal 'None' em varias tabelas - achado por Claude 08/09 revisando o app antes da entrega pra Amanda, mesma classe do bug do JSON da v18.1. Causa: Streamlit nao tem placeholder default vazio pra valor nulo em st.dataframe/st.data_editor (issue streamlit/streamlit#7360, corrigido via parametro 'placeholder' adicionado na propria lib). Fix: placeholder="" adicionado nas 23 chamadas de st.dataframe/st.data_editor do arquivo (Confirmar folgas, Custo & Passagens, Urgencias, historico etc.) - nenhuma mudanca de logica/dado, so' exibicao. Ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v18.1"
+VERSAO_APP = "v18.2"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -396,7 +396,7 @@ def _renderizar_urgencias_dash(resultado):
         _linhas = resultado.get(_chave) or []
         st.write(f"**{_titulo}** ({len(_linhas)})")
         if _linhas:
-            st.dataframe(pd.DataFrame(_linhas), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(_linhas), use_container_width=True, hide_index=True, placeholder="")
         else:
             st.caption("Nenhum registro.")
 
@@ -741,7 +741,7 @@ def pagina_importar_re090(supabase):
             else:
                 st.write(f"**{arquivo.name}** — {len(linhas)} linha(s) com nome preenchido.")
                 with st.expander(f"Ver linhas antes de importar — {arquivo.name}"):
-                    st.dataframe(linhas)
+                    st.dataframe(linhas, placeholder="")
 
         if st.button("Importar", type="primary"):
             resultado_por_arquivo = {}
@@ -761,7 +761,7 @@ def pagina_importar_re090(supabase):
             if duplicadas:
                 msg += f", {duplicadas} duplicada(s) (já existia folga prevista pra essa pessoa nessa mesma data — ignorada, não criou de novo)"
             st.success(msg + ".")
-            st.dataframe(resultados)
+            st.dataframe(resultados, placeholder="")
             if criadas:
                 st.info(
                     "➡️ Próximo passo: as folgas criadas já aparecem em **Previsão de folgas** "
@@ -824,7 +824,7 @@ def pagina_importar_re090(supabase):
             disabled=[c for c in df_pend.columns if c not in ("resolvido",)],
             hide_index=True,
             use_container_width=True,
-            key="editor_pendencias",
+            key="editor_pendencias", placeholder="",
         )
         _botao_exportar_excel(df_pend.drop(columns=["resolvido"]), "viajai_pendencias.xlsx")
         if st.button(
@@ -966,7 +966,7 @@ def pagina_confirmar_folgas(supabase):
             },
             hide_index=True,
             use_container_width=True,
-            key="editor_confirmar_folgas",
+            key="editor_confirmar_folgas", placeholder="",
         )
         _botao_exportar_excel(
             base.drop(columns=["status_novo", "data_saida_real", "data_retorno_real", "motivo_venda"]),
@@ -1009,7 +1009,7 @@ def pagina_confirmar_folgas(supabase):
     st.caption("Últimas mudanças registradas — quem, quando, o que mudou.")
     hist = supabase.rpc("viajai_listar_historico_folga", {"p_limite": 100}).execute()
     if hist.data:
-        st.dataframe(hist.data, use_container_width=True, hide_index=True)
+        st.dataframe(hist.data, use_container_width=True, hide_index=True, placeholder="")
     else:
         st.caption("Nenhuma mudança registrada ainda.")
 
@@ -1162,7 +1162,7 @@ def pagina_previsao(supabase):
         column_order=colunas_principais,
         hide_index=True,
         use_container_width=True,
-        key="editor_previsao",
+        key="editor_previsao", placeholder="",
     )
     _botao_exportar_excel(df.drop(columns=["override_manual"]), "viajai_previsao_folgas.xlsx")
 
@@ -1204,7 +1204,7 @@ def pagina_previsao(supabase):
     desvio = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 200}).execute()
     if desvio.data:
         df_desvio = pd.DataFrame(desvio.data)
-        st.dataframe(df_desvio, use_container_width=True, hide_index=True)
+        st.dataframe(df_desvio, use_container_width=True, hide_index=True, placeholder="")
         _botao_exportar_excel(df_desvio, "viajai_desvio_planejamento.xlsx")
     else:
         st.caption("Nenhuma folga confirmada/realizada ainda pra comparar.")
@@ -1236,7 +1236,7 @@ def pagina_custo_passagens(supabase):
                 }).execute()
                 if sug.data:
                     st.write("**Fornecedor mais usado nessa rota:**")
-                    st.dataframe(sug.data, hide_index=True, use_container_width=True)
+                    st.dataframe(sug.data, hide_index=True, use_container_width=True, placeholder="")
                 else:
                     st.caption("Sem fornecedor registrado ainda pra essa rota.")
 
@@ -1245,7 +1245,7 @@ def pagina_custo_passagens(supabase):
                 }).execute()
                 if comp_modal.data:
                     st.write("**Comparativo por modal (preço médio e duração média):**")
-                    st.dataframe(comp_modal.data, hide_index=True, use_container_width=True)
+                    st.dataframe(comp_modal.data, hide_index=True, use_container_width=True, placeholder="")
                 else:
                     st.caption("Sem dado suficiente ainda pra comparar modal nessa rota.")
             else:
@@ -1364,7 +1364,7 @@ def pagina_custo_passagens(supabase):
                     st.write(f"Viagem de **{_sent}** — {_n_trechos} trecho(s)")
                     st.dataframe(
                         _grupo.drop(columns=["sentido", "viagem_id"]),
-                        hide_index=True, use_container_width=True,
+                        hide_index=True, use_container_width=True, placeholder="",
                     )
             else:
                 st.caption("Nenhum trecho registrado ainda pra essa folga.")
@@ -1372,7 +1372,7 @@ def pagina_custo_passagens(supabase):
             gastos_resp = supabase.rpc("viajai_listar_gastos_folga", {"p_folga_id": folga_id_sel}).execute()
             st.write("**Gastos extras já registrados:**")
             if gastos_resp.data:
-                st.dataframe(pd.DataFrame(gastos_resp.data), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(gastos_resp.data), hide_index=True, use_container_width=True, placeholder="")
             else:
                 st.caption("Nenhum gasto extra registrado ainda.")
 
@@ -1549,7 +1549,7 @@ def pagina_custo_passagens(supabase):
         comp = supabase.rpc("viajai_comparativo_custo_folga", {"p_limite": 200}).execute()
         if comp.data:
             df_comp = pd.DataFrame(comp.data)
-            st.dataframe(df_comp, hide_index=True, use_container_width=True)
+            st.dataframe(df_comp, hide_index=True, use_container_width=True, placeholder="")
             _botao_exportar_excel(df_comp, "viajai_comparativo_custo.xlsx")
         else:
             st.caption("Nenhum custo registrado ainda pra comparar com o desvio de planejamento.")
@@ -1611,7 +1611,7 @@ def pagina_custo_passagens(supabase):
         lancs = supabase.rpc("viajai_listar_lancamentos_rapidos", {"p_limite": 200}).execute()
         if lancs.data:
             df_lanc = pd.DataFrame(lancs.data)
-            st.dataframe(df_lanc, hide_index=True, use_container_width=True)
+            st.dataframe(df_lanc, hide_index=True, use_container_width=True, placeholder="")
             _botao_exportar_excel(df_lanc, "viajai_lancamentos_rapidos.xlsx")
 
             # Atribuir colaborador retroativamente (RH subiu/ativou a pessoa
@@ -1699,7 +1699,7 @@ def pagina_custo_passagens(supabase):
         resumo = supabase.rpc("viajai_resumo_custo_por_rota", {"p_limite": 100}).execute()
         if resumo.data:
             df_resumo = pd.DataFrame(resumo.data)
-            st.dataframe(df_resumo, hide_index=True, use_container_width=True)
+            st.dataframe(df_resumo, hide_index=True, use_container_width=True, placeholder="")
             _botao_exportar_excel(df_resumo, "viajai_resumo_custo_rota.xlsx")
         else:
             st.caption("Nenhum custo registrado ainda (nem lançamento rápido nem trecho com preço).")
@@ -1712,7 +1712,7 @@ def pagina_custo_passagens(supabase):
     if periodo_resp.data:
         df_periodo = pd.DataFrame(periodo_resp.data)
         st.bar_chart(df_periodo.set_index("periodo")["valor_total"])
-        st.dataframe(df_periodo, hide_index=True, use_container_width=True)
+        st.dataframe(df_periodo, hide_index=True, use_container_width=True, placeholder="")
         _botao_exportar_excel(df_periodo, "viajai_gasto_por_periodo.xlsx")
     else:
         st.caption("Nenhum custo com data registrada ainda nesse período.")
@@ -2716,7 +2716,7 @@ def pagina_chat(supabase):
                 st.write(resultado if resultado else "(sem dado pra essa consulta)")
             else:
                 df_dash = pd.DataFrame(resultado)
-                st.dataframe(df_dash, use_container_width=True, hide_index=True)
+                st.dataframe(df_dash, use_container_width=True, hide_index=True, placeholder="")
                 _botao_baixar_relatorio_html(extra, key="baixar_relatorio_dash")
                 if extra.get("tool") == "consultar_localizacoes_canteiro" and {
                     "latitude", "longitude"
@@ -2755,7 +2755,7 @@ def pagina_chat(supabase):
                 elif _item["tool"] == "consultar_urgencias" and isinstance(_resultado_item, dict):
                     _renderizar_urgencias_dash(_resultado_item)
                 elif isinstance(_resultado_item, list) and _resultado_item:
-                    st.dataframe(pd.DataFrame(_resultado_item), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(_resultado_item), use_container_width=True, hide_index=True, placeholder="")
                 else:
                     st.write(_resultado_item if _resultado_item else "(sem dado)")
             _botao_baixar_relatorio_analise_html(analise, key="baixar_analise_ia")
@@ -2895,7 +2895,7 @@ def pagina_urgencias(supabase):
     try:
         r1 = supabase.rpc("viajai_folgas_sem_passagem", {"p_dias_janela": 10}).execute()
         if r1.data:
-            st.dataframe(pd.DataFrame(r1.data), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(r1.data), use_container_width=True, hide_index=True, placeholder="")
         else:
             st.success("Nenhuma folga nos próximos 10 dias sem passagem lançada.")
     except Exception as e:
@@ -2913,7 +2913,7 @@ def pagina_urgencias(supabase):
             "viajai_alerta_preco_fora_padrao", {"p_dias_janela": 30, "p_desvio_pct": 0.4}
         ).execute()
         if r2.data:
-            st.dataframe(pd.DataFrame(r2.data), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(r2.data), use_container_width=True, hide_index=True, placeholder="")
         else:
             st.success("Nenhum lançamento recente fora do padrão histórico da rota (desvio ≥ 40%).")
     except Exception as e:
@@ -2933,7 +2933,7 @@ def pagina_urgencias(supabase):
         r3 = supabase.rpc("viajai_folga_passagem_para_revisar").execute()
         if r3.data:
             df_revisar = pd.DataFrame(r3.data)
-            st.dataframe(df_revisar, use_container_width=True, hide_index=True)
+            st.dataframe(df_revisar, use_container_width=True, hide_index=True, placeholder="")
 
             df_revisar["_rotulo"] = df_revisar.apply(
                 lambda r: (
@@ -2985,7 +2985,7 @@ def pagina_urgencias(supabase):
             r3h = supabase.rpc("viajai_listar_revisoes_passagem", {"p_limite": 200}).execute()
             if r3h.data:
                 df_hist_rev = pd.DataFrame(r3h.data)
-                st.dataframe(df_hist_rev, use_container_width=True, hide_index=True)
+                st.dataframe(df_hist_rev, use_container_width=True, hide_index=True, placeholder="")
                 _botao_exportar_excel(df_hist_rev, "viajai_historico_revisoes_passagem.xlsx")
             else:
                 st.caption("Nenhuma revisão registrada ainda.")
@@ -3003,7 +3003,7 @@ def pagina_urgencias(supabase):
     try:
         r4 = supabase.rpc("viajai_listar_log_erro", {"p_limite": 20}).execute()
         if r4.data:
-            st.dataframe(pd.DataFrame(r4.data), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(r4.data), use_container_width=True, hide_index=True, placeholder="")
         else:
             st.success("Nenhum erro registrado.")
     except Exception as e:
