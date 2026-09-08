@@ -1,3 +1,25 @@
+# Viaj.AI — v19.0 (evolucao estrutural: "Confirmar folgas" + chat cobrem
+# folga ja 'confirmada'/'em_andamento', nao so' 'prevista' - schema_v0.31)
+# Pedido do Rafael (08/09), em resposta ao achado de que nao existia
+# NENHUM caminho (nem tela, nem chat) pra marcar uma folga ja 'confirmada'/
+# 'em_andamento' como 'vendida'/'cancelada' - so' dava pra fazer essa
+# transicao enquanto a folga ainda estava 'prevista'. Isso contradizia a
+# propria "Passagem pra revisar" (v0.29), que documenta o cenario "folga
+# vendida/cancelada DEPOIS DE JA COMPRADA" (ou seja, ja 'confirmada').
+# Decisao do Rafael, verbatim: "deixa coberto, pode ser editavel e
+# ajustavel dps, se nao cobrir nao tem saida ne? deixa tudo o fluxo fluido".
+# Classificado como EVOLUCAO (bump inteiro, nao decimal) porque muda
+# logica/estrutura central, nao so' corrige um valor: alarga o WHERE e o
+# RETURNS TABLE (coluna `status` nova) da RPC viajai_listar_folgas_
+# previstas() (mesmo nome mantido de proposito - continua sendo "folgas em
+# aberto pra agir"), muda o default do dropdown "Status novo" (antes fixo
+# em 'prevista', agora = status real da linha) e a logica de diff no botao
+# Salvar (compara contra o status original, nao contra 'prevista' fixo), e
+# muda a regra de negocio da tool de chat propor_atualizar_folga (aceita
+# 'prevista'/'confirmada'/'em_andamento' como ponto de partida, nao so'
+# 'prevista'). NAO RODA sem rodar schema_v0.31_viajai_confirmar_folgas_
+# abertas.txt no Supabase ANTES do deploy (a RPC muda de assinatura).
+#
 # Viaj.AI — v18.5 (fix pragmatico: "Salvar ajustes de urgencia" continuava
 # mudo mesmo apos a v18.4 - mensagem trocada de fila (_flash+rerun) pra
 # direta, sem rerun. Achado testando ao vivo 08/09: depois do fix da v18.4
@@ -89,7 +111,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v18.5"
+VERSAO_APP = "v19.0"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -926,11 +948,12 @@ def pagina_confirmar_folgas(supabase):
     st.subheader("Confirmar folgas")
     st.caption(
         "Fecha o ciclo: registre aqui o que realmente aconteceu com cada "
-        "folga que caiu como 'prevista' (via import ou manual). Sem isso, "
-        "a Previsão de folgas nunca reflete a realidade — só o que foi "
-        "planejado. Edita direto na tabela: muda o 'Status novo' de quem "
-        "mudou, preenche data real se for o caso, e clica em Salvar no "
-        "final — quem ficar em 'prevista' não é tocado."
+        "folga em aberto (status 'prevista', 'confirmada' ou 'em_andamento' "
+        "— via import ou manual). Sem isso, a Previsão de folgas nunca "
+        "reflete a realidade — só o que foi planejado. Edita direto na "
+        "tabela: muda o 'Status novo' de quem mudou, preenche data real se "
+        "for o caso, e clica em Salvar no final — quem não mudar o status "
+        "não é tocado."
     )
     st.info(
         "✏️ Só as colunas com lápis são editáveis: **Status novo**, "
@@ -949,7 +972,7 @@ def pagina_confirmar_folgas(supabase):
 
     previstas = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 300}).execute()
     if not previstas.data:
-        st.caption("Nenhuma folga 'prevista' aguardando confirmação no momento.")
+        st.caption("Nenhuma folga em aberto (prevista/confirmada/em_andamento) aguardando ação no momento.")
     else:
         base = pd.DataFrame(previstas.data)
         # "atrasada" = data de saida prevista ja passou e ninguem confirmou
@@ -974,7 +997,14 @@ def pagina_confirmar_folgas(supabase):
             base["urgencia"] = None
         base["urgencia"] = base["urgencia"].fillna("—")
         base = base.sort_values(by=["situacao", "data_saida_prevista"], ascending=[True, True])
-        base["status_novo"] = "prevista"
+        # v18.6 (pedido do Rafael 08/09, "deixa coberto, fluxo fluido"): antes
+        # essa lista so' trazia folga 'prevista' e o default do dropdown era
+        # sempre "prevista" fixo. Agora tambem traz 'confirmada'/'em_andamento'
+        # (schema_v0.31), entao o ponto de partida de cada linha tem que ser
+        # o status REAL dela, senao toda linha ja confirmada apareceria como
+        # se estivesse "prevista" (errado) e qualquer status escolhido pareceria
+        # uma "mudanca" mesmo sem ser.
+        base["status_novo"] = base["status"]
         base["data_saida_real"] = pd.NaT
         base["data_retorno_real"] = pd.NaT
         base["motivo_venda"] = ""
@@ -982,11 +1012,15 @@ def pagina_confirmar_folgas(supabase):
         editado = st.data_editor(
             base,
             column_order=[
-                "situacao", "urgencia", "nome", "obra_nome", "canteiro_nome",
+                "status", "situacao", "urgencia", "nome", "obra_nome", "canteiro_nome",
                 "data_saida_prevista", "data_retorno_prevista",
                 "status_novo", "data_saida_real", "data_retorno_real", "motivo_venda",
             ],
             column_config={
+                "status": st.column_config.TextColumn(
+                    "🔒 Status atual", disabled=True,
+                    help="Status real da folga agora — prevista, confirmada ou em_andamento.",
+                ),
                 "situacao": st.column_config.TextColumn("🔒 Situação", disabled=True),
                 "urgencia": st.column_config.TextColumn(
                     "🔒 Urgência", disabled=True,
@@ -999,7 +1033,7 @@ def pagina_confirmar_folgas(supabase):
                 "data_retorno_prevista": st.column_config.DateColumn("🔒 Retorno previsto", disabled=True),
                 "status_novo": st.column_config.SelectboxColumn(
                     "✏️ Status novo", options=_STATUS_OPCOES, required=True,
-                    help="Deixa 'prevista' pra não mexer nessa linha.",
+                    help="Deixa igual ao 'Status atual' pra não mexer nessa linha.",
                 ),
                 "data_saida_real": st.column_config.DateColumn(
                     "✏️ Saída real", help="Preenche se marcou 'em_andamento' ou 'realizada'."
@@ -1021,7 +1055,10 @@ def pagina_confirmar_folgas(supabase):
         )
 
         if st.button("Salvar alterações", type="primary"):
-            mudou = editado[editado["status_novo"] != "prevista"]
+            # v18.6: compara contra o status ORIGINAL de cada linha (base,
+            # antes da edicao) - nao mais contra "prevista" fixo, ja que
+            # agora uma linha pode comecar em 'confirmada'/'em_andamento'.
+            mudou = editado[editado["status_novo"] != base["status"]]
             if mudou.empty:
                 st.info("Nenhuma linha teve o status alterado — nada pra salvar.")
             else:
@@ -2004,13 +2041,15 @@ TOOLS_VIAJAI = [
         "description": (
             "Propoe atualizar o status de UMA folga especifica (confirmar saida/retorno, marcar "
             "vendida, cancelada etc) - MESMA logica da tela 'Confirmar folgas', so' que pelo chat. "
-            "NUNCA grava sozinho, so' resolve qual folga 'prevista' bate com o nome dito e monta a "
-            "proposta pro usuario confirmar no painel (igual propor_lancamento_rapido). Use quando o "
-            "usuario disser algo tipo 'confirma que o Fulano saiu ontem', 'marca a folga do Ciclano "
-            "como vendida', 'o Fulano ja voltou, retornou dia X'. So' funciona pra folga que ainda "
-            "esta 'prevista' (aguardando confirmacao) - se a ferramenta devolver erro (nome nao achado "
-            "ou mais de 1 folga prevista pra esse nome), oriente o usuario a usar a tela 'Confirmar "
-            "folgas' direto pra escolher a linha certa."
+            "NUNCA grava sozinho, so' resolve qual folga em aberto (status 'prevista', 'confirmada' "
+            "ou 'em_andamento') bate com o nome dito e monta a proposta pro usuario confirmar no "
+            "painel (igual propor_lancamento_rapido) - desde a v18.6 cobre inclusive folga que ja "
+            "tinha passagem comprada ('confirmada') e depois foi vendida/cancelada, nao so' folga "
+            "ainda 'prevista'. Use quando o usuario disser algo tipo 'confirma que o Fulano saiu "
+            "ontem', 'marca a folga do Ciclano como vendida', 'o Fulano ja voltou, retornou dia X'. "
+            "Se a ferramenta devolver erro (nome nao achado ou mais de 1 folga em aberto pra esse "
+            "nome), oriente o usuario a usar a tela 'Confirmar folgas' direto pra escolher a linha "
+            "certa."
         ),
         "input_schema": {
             "type": "object",
@@ -2201,7 +2240,8 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             }
         elif nome == "propor_atualizar_folga":
             # MESMA regra de seguranca: NUNCA grava aqui. So' resolve QUAL
-            # folga (tem que achar exatamente 1 'prevista' com o nome dito -
+            # folga (tem que achar exatamente 1 folga em aberto - prevista,
+            # confirmada ou em_andamento, schema_v0.31 - com o nome dito -
             # 0 ou mais de 1 e' erro, pra nao arriscar atualizar a pessoa
             # errada) e monta a proposta - quem executa de verdade e' o
             # clique humano no painel, chamando viajai_atualizar_folga
@@ -2221,14 +2261,15 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             if len(candidatos) == 0:
                 return {
                     "erro": (
-                        f"Nao achei nenhuma folga 'prevista' em aberto pra '{colaborador_nome_dito}' - "
-                        "confere o nome ou oriente a usar a tela 'Confirmar folgas' direto."
+                        f"Nao achei nenhuma folga em aberto (prevista/confirmada/em_andamento) pra "
+                        f"'{colaborador_nome_dito}' - confere o nome ou oriente a usar a tela "
+                        "'Confirmar folgas' direto."
                     )
                 }
             if len(candidatos) > 1:
                 return {
                     "erro": (
-                        f"Achei {len(candidatos)} folgas 'prevista' pra '{colaborador_nome_dito}' - "
+                        f"Achei {len(candidatos)} folgas em aberto pra '{colaborador_nome_dito}' - "
                         "nome ambiguo, preciso de um nome mais especifico ou oriente a usar a tela "
                         "'Confirmar folgas' direto pra escolher a linha certa."
                     )
@@ -2252,7 +2293,7 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
                     f"proposta de atualizacao de folga adicionada ao painel lateral (agora sao "
                     f"{total_pendentes} pendente(s) aguardando confirmacao, nada foi gravado ainda)"
                 ),
-                "resumo": f"{folga_alvo.get('nome')}: prevista -> {status_novo}",
+                "resumo": f"{folga_alvo.get('nome')}: {folga_alvo.get('status')} -> {status_novo}",
             }
         elif nome == "calcular_diaria_deslocamento":
             tipo = (entrada.get("tipo") or "").strip()
@@ -3090,7 +3131,7 @@ def pagina_ajuda():
         """
 ### Fluxo geral
 1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco. Sem match com o RH vira pendência (não trava nada); tem botão **"Reprocessar pendências"** pra tentar casar de novo mais tarde, sem reupload, quando o RH cadastrar a pessoa.
-2. **Confirmar folgas** — confirma folga em status "prevista", passando pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada".
+2. **Confirmar folgas** — atualiza folga em aberto (status "prevista", "confirmada" ou "em_andamento") pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada" — inclusive folga que já tinha passagem comprada e depois foi vendida/cancelada.
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
 4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Aba "Por folga": adiciona trecho por trecho de uma mesma viagem (reenviar com o mesmo "Sentido" empilha na MESMA viagem, não cria outra) e dá pra marcar/desfazer reembolso de um trecho (some do gasto real, sem apagar o preço original). Aba "Lançamento rápido": dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome.
 5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — dá pra marcar como revisada, fica guardado num histórico permanente), e os últimos erros registrados pelo sistema.
@@ -3130,7 +3171,7 @@ Passagem comprada e folga são registros independentes — uma não abre/fecha a
 - "Me dá o link do ClickBus/Skyscanner pra rota [origem]-[destino]"
 
 ### Mensagens que confundem mas não são erro
-- **"Não achei folga com status 'prevista'"** → normal, não existe folga aberta esperando confirmação pra esse colaborador agora. Vá em "Confirmar folgas" direto.
+- **"Não achei nenhuma folga em aberto (prevista/confirmada/em_andamento)"** → normal, não existe folga em aberto esperando ação pra esse colaborador agora. Vá em "Confirmar folgas" direto.
 - **Quadro vermelho / "postgrest.exceptions.APIError"** → esse sim é erro real de sistema. Reporte a hora exata pro suporte.
         """
     )
