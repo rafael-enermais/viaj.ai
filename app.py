@@ -1,4 +1,4 @@
-# Viaj.AI — v18.0 (multi-trecho intuitivo + reembolso de passagem - pedido do Rafael 08/09. (1) 'Por folga' agora deixa explicito que reenviar o form de trecho com o MESMO sentido vira outro trecho na MESMA viagem (nao uma nova) - selecao de sentido saiu de dentro do form pra virar reativa, com aviso ao vivo; lista de trechos agora agrupada por viagem. (2) Confirmado no codigo (nao supunha): RE090 nunca leu trecho/passagem, so' datas de folga - nao muda com este pedido. (3) schema_v0.30: trecho ganha reembolsado/valor_reembolsado/data_reembolso; formulario novo em 'Por folga' pra marcar/desfazer; custo_passagens (comparativo de custo e previsao de gasto) passa a descontar reembolso - decisao registrada no schema: RPCs de 'preco pra comprar' (comparar modais/fornecedor/resumo por rota) continuam com preco BRUTO de proposito. Nova capacidade - ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v18.1 (fix: consultar_urgencias mostrava JSON cru no painel do chat - achado pelo Rafael 08/09, 'parece erro de principiante'. Causa: e' a UNICA ferramenta que devolve um dict de 3 LISTAS (nao 1 lista de linhas nem 1 dict escalar como calcular_diaria_deslocamento, que ja tinha cartao proprio desde a v13.1) - o renderizador do painel so' tratava esses 2 casos, o resto caia no fallback st.write() que no Streamlit mostra dict como JSON navegavel. Fix: _renderizar_urgencias_dash() novo, com o mesmo tratamento em 'Painel - ultima consulta', '🧭 Analise do assistente' e no relatorio HTML exportado (_corpo_item_relatorio_viajai) - as 3 secoes (folgas sem passagem/precos fora do padrao/passagens pra revisar) viram 3 tabelas rotuladas em vez de 1 JSON. Correcao pontual - ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v18.0"
+VERSAO_APP = "v18.1"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -382,6 +382,25 @@ def _renderizar_calculo_diaria(resultado):
         st.caption(resultado["resumo"])
 
 
+def _renderizar_urgencias_dash(resultado):
+    """Painel do chat pra consultar_urgencias - resultado e' um dict com
+    3 LISTAS (nao 1 lista de linhas, nao 1 dict escalar), caso que o
+    renderizador padrao do painel nao cobria e caia no fallback st.write()
+    (mostra JSON cru) - achado pelo Rafael 08/09 ('parece erro de
+    principiante'). 3 sub-tabelas rotuladas, cada uma com contagem."""
+    for _titulo, _chave in (
+        ("🚨 Folgas sem passagem", "folgas_sem_passagem"),
+        ("💸 Preços fora do padrão", "precos_fora_padrao"),
+        ("↩️ Passagens pra revisar", "passagens_para_revisar"),
+    ):
+        _linhas = resultado.get(_chave) or []
+        st.write(f"**{_titulo}** ({len(_linhas)})")
+        if _linhas:
+            st.dataframe(pd.DataFrame(_linhas), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Nenhum registro.")
+
+
 REPORTS_RAPIDOS_VIAJAI = [
     {"label": "📊 Previsão de folgas", "tool": "consultar_previsao_folgas", "input": {}},
     {"label": "💰 Previsão de gasto", "tool": "consultar_previsao_gasto_colaborador", "input": {}},
@@ -399,6 +418,20 @@ def _corpo_item_relatorio_viajai(tool, resultado):
     gerar_relatorio_analise_html_viajai)."""
     if not resultado:
         return "<p>Nenhum dado encontrado para essa consulta.</p>"
+    if tool == "consultar_urgencias" and isinstance(resultado, dict):
+        _blocos = []
+        for _titulo, _chave in (
+            ("Folgas sem passagem", "folgas_sem_passagem"),
+            ("Preços fora do padrão", "precos_fora_padrao"),
+            ("Passagens pra revisar", "passagens_para_revisar"),
+        ):
+            _linhas = resultado.get(_chave) or []
+            _blocos.append(f"<p><strong>{_titulo} ({len(_linhas)})</strong></p>")
+            if _linhas:
+                _blocos.append(pd.DataFrame(_linhas).to_html(index=False, border=0, classes="tabela"))
+            else:
+                _blocos.append("<p>Nenhum registro.</p>")
+        return "".join(_blocos)
     if isinstance(resultado, dict):
         if resultado.get("erro"):
             return f"<p>{resultado['erro']}</p>"
@@ -2677,6 +2710,8 @@ def pagina_chat(supabase):
             resultado = extra.get("resultado")
             if extra.get("tool") == "calcular_diaria_deslocamento" and isinstance(resultado, dict):
                 _renderizar_calculo_diaria(resultado)
+            elif extra.get("tool") == "consultar_urgencias" and isinstance(resultado, dict):
+                _renderizar_urgencias_dash(resultado)
             elif not isinstance(resultado, list) or not resultado:
                 st.write(resultado if resultado else "(sem dado pra essa consulta)")
             else:
@@ -2717,6 +2752,8 @@ def pagina_chat(supabase):
                 _resultado_item = _item.get("resultado")
                 if _item["tool"] == "calcular_diaria_deslocamento" and isinstance(_resultado_item, dict):
                     _renderizar_calculo_diaria(_resultado_item)
+                elif _item["tool"] == "consultar_urgencias" and isinstance(_resultado_item, dict):
+                    _renderizar_urgencias_dash(_resultado_item)
                 elif isinstance(_resultado_item, list) and _resultado_item:
                     st.dataframe(pd.DataFrame(_resultado_item), use_container_width=True, hide_index=True)
                 else:
