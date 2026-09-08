@@ -1,20 +1,23 @@
-# Viaj.AI — v18.3 (fix: mensagens de sucesso/aviso sumiam depois de clicar em
-# varios botoes - achado por Claude 08/09 testando upload real de RE090 e
-# "Forcar nivel manual" com o Rafael. Causa: o padrao st.success(...) seguido
-# na sequencia por st.rerun() faz o rerun reiniciar o script ANTES do
-# navegador desenhar aquele frame - a mensagem nunca chegava a aparecer,
-# mesmo a acao tendo funcionado e gravado certo no banco (confirmado nos 2
-# casos testados ao vivo: "Reprocessar pendencias" e "Salvar ajustes de
-# urgencia" - dado persistiu, so' o feedback visual sumia). Fix: helper
-# _flash()/_renderizar_flash() guarda a mensagem na sessao antes do rerun e
-# mostra na leva seguinte (chamada 1x no topo do main()). Corrigidos os 16
-# call sites reais (achados via ast, nao regex, pra nao pegar st.success
-# que NAO precede rerun): Importar RE090 (reprocessar pendencias, salvar
-# pendencias resolvidas), Confirmar folgas, Previsao de folgas (salvar
-# ajustes de urgencia), Custo & Passagens (trecho, reembolso, gasto,
-# lancamento, atribuir colaborador, apagar - 8 pontos), Urgencias (marcar
-# revisada). Nenhuma mudanca de logica/dado, so' exibicao. Ver
-# 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v18.4 (fix: mensagens de ERRO tambem sumiam em 3 telas com
+# salvamento em lote - achado por Claude 08/09 testando "Salvar ajustes de
+# urgencia" ao vivo com o Rafael: a acao gravava certo no banco (confirmado
+# navegando pra fora e voltando 4x), mas nenhuma mensagem aparecia - nem
+# sucesso nem erro. Causa: mesma familia do bug da v18.3 (rerun engole
+# mensagem pendente), mas nesse padrao especifico - loop "for linha in
+# mudou.iterrows(): try/except" seguido de UM st.rerun() no final,
+# compartilhado entre sucesso e erro - o st.error(...) de dentro do except
+# nao estava adjacente ao rerun (tinha o resto do loop + calculo de
+# "sucesso" no meio), entao o detector ast da v18.3 (que so' pegava
+# st.success/info/warning/error IMEDIATAMENTE antes do rerun) nao pegou
+# esses 3 pontos. Fix: os 3 usam _flash("error", ...) tambem agora, mesmo
+# helper da v18.3. Call sites corrigidos: Importar RE090 (resolver
+# pendencias em lote), Confirmar folgas (salvar alteracoes em lote),
+# Previsao de folgas (salvar ajustes de urgencia em lote) - os 3 unicos
+# lugares do arquivo com esse padrao especifico de loop+try/except+rerun-
+# unico-no-final (os outros ~13 st.error do arquivo sao dentro de
+# try/except que so' faz rerun no caminho de SUCESSO, entao o erro ja
+# aparecia normal sem esse bug). Nenhuma mudanca de logica/dado, so'
+# exibicao. Ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -81,7 +84,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v18.3"
+VERSAO_APP = "v18.4"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -902,7 +905,7 @@ def pagina_importar_re090(supabase):
                         }).execute()
                     except Exception as e:
                         erros += 1
-                        st.error(f"Erro ao resolver pendência {linha['id']}: {e}")
+                        _flash("error", f"Erro ao resolver pendência {linha['id']}: {e}")
                 sucesso = len(marcadas) - erros
                 if sucesso:
                     _flash("success", f"{sucesso} pendência(s) marcada(s) como resolvida(s).")
@@ -1035,7 +1038,7 @@ def pagina_confirmar_folgas(supabase):
                         }).execute()
                     except Exception as e:
                         erros += 1
-                        st.error(f"Erro ao salvar {linha['nome']}: {e}")
+                        _flash("error", f"Erro ao salvar {linha['nome']}: {e}")
                 sucesso = len(mudou) - erros
                 if sucesso:
                     _flash("success", f"{sucesso} folga(s) atualizada(s).")
@@ -1224,7 +1227,7 @@ def pagina_previsao(supabase):
                         }).execute()
                 except Exception as e:
                     erros += 1
-                    st.error(f"Erro ao salvar ajuste de urgência de {linha['nome']}: {e}")
+                    _flash("error", f"Erro ao salvar ajuste de urgência de {linha['nome']}: {e}")
             sucesso = len(mudou) - erros
             if sucesso:
                 _flash("success", f"{sucesso} ajuste(s) de urgência salvo(s).")
