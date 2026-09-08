@@ -1,4 +1,4 @@
-# Viaj.AI — v17.0 (revisao de passagem com historico permanente - pedido do Rafael 08/09: fechar o gap da secao 'Passagem pra revisar' em Urgencias, mas SEM virar so' um checkbox que apaga - ele pediu 'nao deixe gerar pendencia... gerar banco de dados historico pra melhorias no futuro'. schema_v0.29 (nova tabela viajai.revisao_passagem, nunca apagada) + RPC viajai_marcar_passagem_revisada + viajai_listar_revisoes_passagem; viajai_folga_passagem_para_revisar agora exclui quem ja foi revisado (nao acumula pendencia), mas o registro fica pra sempre no historico (analisavel por mes depois). Nova capacidade - ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v18.0 (multi-trecho intuitivo + reembolso de passagem - pedido do Rafael 08/09. (1) 'Por folga' agora deixa explicito que reenviar o form de trecho com o MESMO sentido vira outro trecho na MESMA viagem (nao uma nova) - selecao de sentido saiu de dentro do form pra virar reativa, com aviso ao vivo; lista de trechos agora agrupada por viagem. (2) Confirmado no codigo (nao supunha): RE090 nunca leu trecho/passagem, so' datas de folga - nao muda com este pedido. (3) schema_v0.30: trecho ganha reembolsado/valor_reembolsado/data_reembolso; formulario novo em 'Por folga' pra marcar/desfazer; custo_passagens (comparativo de custo e previsao de gasto) passa a descontar reembolso - decisao registrada no schema: RPCs de 'preco pra comprar' (comparar modais/fornecedor/resumo por rota) continuam com preco BRUTO de proposito. Nova capacidade - ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v17.0"
+VERSAO_APP = "v18.0"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1319,7 +1319,20 @@ def pagina_custo_passagens(supabase):
             viagens_resp = supabase.rpc("viajai_listar_viagens_folga", {"p_folga_id": folga_id_sel}).execute()
             st.write("**Trechos já registrados:**")
             if viagens_resp.data:
-                st.dataframe(pd.DataFrame(viagens_resp.data), hide_index=True, use_container_width=True)
+                df_viagens = pd.DataFrame(viagens_resp.data)
+                st.caption(
+                    "Agrupado por viagem — 'ida' e 'volta' são 2 viagens "
+                    "separadas; cada uma pode ter vários trechos (paradas) "
+                    "na mesma viagem, um embaixo do outro na ordem que foram "
+                    "adicionados."
+                )
+                for (_sent, _vid), _grupo in df_viagens.groupby(["sentido", "viagem_id"], sort=False):
+                    _n_trechos = int(_grupo["trecho_id"].notna().sum())
+                    st.write(f"Viagem de **{_sent}** — {_n_trechos} trecho(s)")
+                    st.dataframe(
+                        _grupo.drop(columns=["sentido", "viagem_id"]),
+                        hide_index=True, use_container_width=True,
+                    )
             else:
                 st.caption("Nenhum trecho registrado ainda pra essa folga.")
 
@@ -1330,18 +1343,31 @@ def pagina_custo_passagens(supabase):
             else:
                 st.caption("Nenhum gasto extra registrado ainda.")
 
+            st.write("**Adicionar trecho (passagem/perna da viagem)**")
+            sentido = st.selectbox("Sentido", ["ida", "volta"], key="trecho_sentido_select")
+            _trechos_do_sentido = [
+                v for v in (viagens_resp.data or [])
+                if v["sentido"] == sentido and v.get("trecho_id") is not None
+            ]
+            if _trechos_do_sentido:
+                st.info(
+                    f"➡️ Já existe uma viagem de '{sentido}' com "
+                    f"{len(_trechos_do_sentido)} trecho(s) (veja acima). O que "
+                    f"você preencher abaixo vira o trecho {len(_trechos_do_sentido) + 1} "
+                    f"dessa MESMA viagem — não cria uma viagem nova. Pra "
+                    f"registrar como outra viagem, muda o 'Sentido' acima."
+                )
+            else:
+                st.caption(f"➡️ Ainda não existe viagem de '{sentido}' pra essa folga — isso vai criar a primeira.")
             with st.form("form_add_trecho"):
-                st.write("Adicionar trecho (passagem/perna da viagem)")
                 st.caption("Só o essencial aqui — o resto é opcional, fica em 'Mais detalhes'.")
                 c1, c2 = st.columns(2)
-                sentido = c1.selectbox("Sentido", ["ida", "volta"])
-                modal = c2.selectbox("Modal", ["aviao", "onibus", "carro", "taxi", "outro"])
+                modal = c1.selectbox("Modal", ["aviao", "onibus", "carro", "taxi", "outro"])
+                data_t = c2.date_input("Data da viagem", value=date.today(), key="trecho_data")
                 c3, c4 = st.columns(2)
                 origem_t = c3.text_input("Origem", key="trecho_origem")
                 destino_t = c4.text_input("Destino", key="trecho_destino")
-                c5, c6 = st.columns(2)
-                preco_t = c5.number_input("Preço (R$)", min_value=0.0, step=0.01, format="%.2f")
-                data_t = c6.date_input("Data da viagem", value=date.today(), key="trecho_data")
+                preco_t = st.number_input("Preço (R$)", min_value=0.0, step=0.01, format="%.2f")
 
                 with st.expander("Mais detalhes (opcional)"):
                     c7, c8 = st.columns(2)
@@ -1391,6 +1417,73 @@ def pagina_custo_passagens(supabase):
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao adicionar trecho: {e}")
+
+            # Reembolso (schema_v0.30) - pedido do Rafael 08/09: passagem
+            # comprada mas depois reembolsada pela companhia, precisava de
+            # um jeito de registrar isso sem virar "gasto com passagem" de
+            # verdade (o dinheiro voltou, nao foi gasto liquido).
+            _trechos_p_reembolso = [
+                v for v in (viagens_resp.data or []) if v.get("trecho_id") is not None
+            ]
+            if _trechos_p_reembolso:
+                with st.expander("💰 Marcar/desfazer reembolso de um trecho"):
+                    st.caption(
+                        "Passagem comprada, mas a companhia devolveu o valor "
+                        "(total ou parcial)? Marca aqui — o valor reembolsado "
+                        "sai do cálculo de gasto real (Previsão de gasto, "
+                        "Comparativo de custo), mas o preço original da "
+                        "passagem continua registrado normalmente."
+                    )
+                    _df_reemb = pd.DataFrame(_trechos_p_reembolso)
+                    _df_reemb["_rotulo"] = _df_reemb.apply(
+                        lambda r: (
+                            f"#{int(r['trecho_id'])} — {r['sentido']} — {r['origem']} -> {r['destino']} — "
+                            f"R$ {r['preco']:.2f}"
+                            + (f" (já reembolsado: R$ {r['valor_reembolsado']:.2f})" if r.get("reembolsado") else "")
+                        ),
+                        axis=1,
+                    )
+                    _rotulo_reemb = st.selectbox("Qual trecho?", _df_reemb["_rotulo"], key="reemb_select")
+                    _linha_reemb = _df_reemb.loc[_df_reemb["_rotulo"] == _rotulo_reemb].iloc[0]
+                    if _linha_reemb.get("reembolsado"):
+                        st.write(
+                            f"Reembolsado em {_linha_reemb.get('data_reembolso') or '—'}: "
+                            f"R$ {_linha_reemb['valor_reembolsado']:.2f}"
+                            + (f" — {_linha_reemb['observacao_reembolso']}" if _linha_reemb.get("observacao_reembolso") else "")
+                        )
+                        if st.button("Desfazer reembolso", key="btn_desfazer_reembolso"):
+                            try:
+                                supabase.rpc("viajai_marcar_trecho_reembolsado", {
+                                    "p_trecho_id": int(_linha_reemb["trecho_id"]),
+                                    "p_reembolsado": False,
+                                }).execute()
+                                st.success("Reembolso desfeito.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao desfazer reembolso: {e}")
+                    else:
+                        with st.form("form_marcar_reembolso"):
+                            valor_reemb = st.number_input(
+                                "Valor reembolsado (R$)", min_value=0.0, step=0.01, format="%.2f",
+                                value=float(_linha_reemb["preco"] or 0),
+                                help="Já vem preenchido com o preço cheio — ajusta se foi reembolso parcial.",
+                            )
+                            data_reemb = st.date_input("Data do reembolso", value=date.today(), key="reemb_data")
+                            obs_reemb = st.text_input("Observação (opcional)", key="reemb_obs")
+                            enviar_reemb = st.form_submit_button("Marcar como reembolsado")
+                        if enviar_reemb:
+                            try:
+                                supabase.rpc("viajai_marcar_trecho_reembolsado", {
+                                    "p_trecho_id": int(_linha_reemb["trecho_id"]),
+                                    "p_reembolsado": True,
+                                    "p_valor_reembolsado": valor_reemb,
+                                    "p_data_reembolso": data_reemb.isoformat() if data_reemb else None,
+                                    "p_observacao": obs_reemb or None,
+                                }).execute()
+                                st.success("Marcado como reembolsado.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao marcar reembolso: {e}")
 
             with st.form("form_add_gasto"):
                 st.write("Adicionar gasto extra (hospedagem, alimentação, transporte local...)")
@@ -2156,14 +2249,17 @@ def _montar_system_prompt_viajai(usuario_email):
         "vendida, cancelada) via propor_atualizar_folga - MESMA regra: nunca grava sozinho, so' "
         "propoe pro usuario confirmar no painel. Fora essas 2 propostas, voce ainda so' CONSULTA "
         "— outra acao (registrar trecho/gasto de uma folga especifica) nao tem ferramenta ainda, "
-        "oriente a usar a tela correspondente. Duas acoes existem SO na tela, sem ferramenta de "
+        "oriente a usar a tela correspondente. 4 acoes existem SO na tela, sem ferramenta de "
         "chat pra executar (voce pode explicar que existem e orientar onde estao, mas nao tem "
         "como fazer por voce): 'reprocessar pendencias de import' (botao na tela 'Importar "
         "RE090', tenta casar de novo contra o RH atual sem precisar reupload), 'atribuir "
         "colaborador' a um lancamento rapido que ficou sem pessoa/so com nome provisorio "
-        "(expander na aba 'Lancamento rapido', dentro de 'Custo & Passagens') e 'marcar "
+        "(expander na aba 'Lancamento rapido', dentro de 'Custo & Passagens'), 'marcar "
         "passagem como revisada' (formulario na aba 'Urgencias', secao 'Passagem vinculada a "
-        "folga vendida/cancelada' - fica registrado pra sempre no historico dali).\n\n"
+        "folga vendida/cancelada' - fica registrado pra sempre no historico dali) e 'marcar/"
+        "desfazer reembolso de um trecho' (expander na aba 'Por folga', dentro de 'Custo & "
+        "Passagens' - desconta do calculo de gasto real, sem mexer no preco original da "
+        "passagem).\n\n"
         "Se o usuario perguntar 'como funciona', 'o que voce consegue fazer', 'pra que serve "
         "essa tela/funcao' ou demonstrar duvida sobre o fluxo do Viaj.AI, EXPLIQUE em texto "
         "claro em vez de tentar chamar uma ferramenta - use como referencia o conteudo da aba "
@@ -2885,7 +2981,7 @@ def pagina_ajuda():
 1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco. Sem match com o RH vira pendência (não trava nada); tem botão **"Reprocessar pendências"** pra tentar casar de novo mais tarde, sem reupload, quando o RH cadastrar a pessoa.
 2. **Confirmar folgas** — confirma folga em status "prevista", passando pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada".
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
-4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Na aba "Lançamento rápido", dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome.
+4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Aba "Por folga": adiciona trecho por trecho de uma mesma viagem (reenviar com o mesmo "Sentido" empilha na MESMA viagem, não cria outra) e dá pra marcar/desfazer reembolso de um trecho (some do gasto real, sem apagar o preço original). Aba "Lançamento rápido": dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome.
 5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — dá pra marcar como revisada, fica guardado num histórico permanente), e os últimos erros registrados pelo sistema.
 6. **Assistente** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
 
@@ -2908,6 +3004,7 @@ def pagina_ajuda():
 - Reprocessar pendências de import (botão na tela "Importar RE090")
 - Atribuir colaborador retroativo a um lançamento rápido (expander na aba "Lançamento rápido")
 - Marcar passagem como revisada (formulário na aba "Urgências", seção "Passagem pra revisar")
+- Marcar/desfazer reembolso de um trecho (expander na aba "Por folga", dentro de "Custo & Passagens")
 
 ### Regra de ouro
 Você pede → o Assistente monta a proposta no painel lateral → **nada é gravado até você confirmar na tela**.
