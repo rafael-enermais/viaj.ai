@@ -1,23 +1,28 @@
-# Viaj.AI — v18.4 (fix: mensagens de ERRO tambem sumiam em 3 telas com
-# salvamento em lote - achado por Claude 08/09 testando "Salvar ajustes de
-# urgencia" ao vivo com o Rafael: a acao gravava certo no banco (confirmado
-# navegando pra fora e voltando 4x), mas nenhuma mensagem aparecia - nem
-# sucesso nem erro. Causa: mesma familia do bug da v18.3 (rerun engole
-# mensagem pendente), mas nesse padrao especifico - loop "for linha in
-# mudou.iterrows(): try/except" seguido de UM st.rerun() no final,
-# compartilhado entre sucesso e erro - o st.error(...) de dentro do except
-# nao estava adjacente ao rerun (tinha o resto do loop + calculo de
-# "sucesso" no meio), entao o detector ast da v18.3 (que so' pegava
-# st.success/info/warning/error IMEDIATAMENTE antes do rerun) nao pegou
-# esses 3 pontos. Fix: os 3 usam _flash("error", ...) tambem agora, mesmo
-# helper da v18.3. Call sites corrigidos: Importar RE090 (resolver
-# pendencias em lote), Confirmar folgas (salvar alteracoes em lote),
-# Previsao de folgas (salvar ajustes de urgencia em lote) - os 3 unicos
-# lugares do arquivo com esse padrao especifico de loop+try/except+rerun-
-# unico-no-final (os outros ~13 st.error do arquivo sao dentro de
-# try/except que so' faz rerun no caminho de SUCESSO, entao o erro ja
-# aparecia normal sem esse bug). Nenhuma mudanca de logica/dado, so'
-# exibicao. Ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v18.5 (fix pragmatico: "Salvar ajustes de urgencia" continuava
+# mudo mesmo apos a v18.4 - mensagem trocada de fila (_flash+rerun) pra
+# direta, sem rerun. Achado testando ao vivo 08/09: depois do fix da v18.4
+# (que corrigiu o st.error engolido em 3 telas), 2 das 3 telas passaram a
+# funcionar certo (Importar RE090 > resolver pendencias, Confirmar folgas >
+# salvar alteracoes - confirmado ao vivo), MAS "Previsao de folgas > Salvar
+# ajustes de urgencia" continuou sem mostrar NADA (nem sucesso nem erro),
+# apesar do dado gravar certo no banco toda vez (confirmado navegando fora
+# e voltando). Investigacao a fundo (nao aceito como "so' aparencia"):
+# confirmado que o botao registra o clique normal (o caminho SEM rerun -
+# "Nenhum ajuste mudou - nada pra salvar" - sempre apareceu certinho, na
+# hora); confirmado que a excecao nao e' o problema (a v18.4 ja cobria
+# isso, sem efeito aqui); confirmado que nao e' problema de indice/
+# comparacao do pandas (a gravacao no banco prova que "mudou" bateu certo).
+# Ou seja: SO' a combinacao especifica desse botao com _flash()+st.rerun()
+# falha, mesmo sendo codigo estruturalmente identico ao de Confirmar folgas
+# (que funciona). Causa exata dentro do Streamlit/data_editor nao
+# identificada com certeza - documentado no proprio código como mistério
+# nao resolvido. Fix pragmatico aplicado: esse botao especifico agora usa
+# st.success()/st.warning() DIRETO (sem fila, sem rerun) - mesmo padrao
+# comprovado do "Nenhum ajuste mudou" que sempre funcionou nessa mesma tela.
+# Troca aceita: a tabela/KPIs so' refletem o ajuste na proxima interacao
+# natural (trocar de aba e voltar, F5) em vez de na hora - mensagem de
+# confirmacao sempre aparece, que e' o que importa. Nenhuma mudanca de
+# logica de gravacao/dado. Ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -84,7 +89,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v18.4"
+VERSAO_APP = "v18.5"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1227,11 +1232,38 @@ def pagina_previsao(supabase):
                         }).execute()
                 except Exception as e:
                     erros += 1
-                    _flash("error", f"Erro ao salvar ajuste de urgência de {linha['nome']}: {e}")
+                    st.error(f"Erro ao salvar ajuste de urgência de {linha['nome']}: {e}")
             sucesso = len(mudou) - erros
-            if sucesso:
-                _flash("success", f"{sucesso} ajuste(s) de urgência salvo(s).")
-            st.rerun()
+            # NAO usa _flash()/st.rerun() aqui de proposito (achado 08/09,
+            # v18.5): mesmo com o mecanismo _flash comprovadamente funcionando
+            # em Confirmar folgas/Reprocessar pendencias (codigo identico),
+            # SO' nesse botao especifico a mensagem nunca aparecia - gravava
+            # certo no banco (confirmado navegando fora e voltando, varias
+            # vezes) mas nem sucesso nem erro renderizava, mesmo depois do fix
+            # de erro-engolido da v18.4. Causa exata nao identificada (nao e'
+            # excecao silenciosa - ja descartado; nao e' problema de indice/
+            # comparacao - a gravacao prova que "mudou" bate certo; testado
+            # com espera de 5s pra descartar race de rerun do proprio
+            # data_editor, mesmo assim falhou) - fica registrado como mistério
+            # nao resolvido do Streamlit especifico dessa combinacao de
+            # data_editor+SelectboxColumn+rerun nessa tela. Solucao pragmatica:
+            # mensagem direta (sem fila, sem rerun) - comprovadamente funciona
+            # aqui (mesmo padrao do "Nenhum ajuste mudou" logo acima, que
+            # sempre apareceu certo). Troca: a tabela/KPIs so' refletem o
+            # ajuste novo na proxima interacao natural (trocar de aba e
+            # voltar, ou F5) em vez de na hora - mas o feedback de "salvou"
+            # aparece sempre, o que é mais importante pro usuario do que o
+            # reordenamento automatico da tabela.
+            if erros:
+                st.warning(
+                    f"{sucesso} ajuste(s) salvo(s), {erros} com erro (ver acima). "
+                    "Troque de aba e volte (ou F5) pra ver a tabela atualizada."
+                )
+            elif sucesso:
+                st.success(
+                    f"{sucesso} ajuste(s) de urgência salvo(s). "
+                    "Troque de aba e volte (ou F5) pra ver a tabela reordenada com o novo nível."
+                )
 
     st.divider()
     st.subheader("Desvio de planejamento")
