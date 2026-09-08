@@ -1,4 +1,4 @@
-# Viaj.AI — v16.5 (fluidez de fluxo - pedido do Rafael 08/09: 'todo o fluxo tem que estar fluido', revisao completa. Orientacao de proximo passo agora em TODAS as telas com tabela (Importar RE090, Confirmar folgas, Previsao); explicado o que cada status de folga significa (prevista/confirmada/em_andamento/realizada/vendida/cancelada) na tela e na Central de Ajuda; achado e corrigido texto desatualizado em Previsao > 'Desvio de planejamento' que dizia 'custo ainda nao tem tela pra registrar' (falso - Custo & Passagens ja tem isso, com versao MAIS completa da mesma tabela) - agora aponta pra la em vez de duplicar/confundir. Ver 00-handoff.md do VIAJAI no vault
+# Viaj.AI — v17.0 (revisao de passagem com historico permanente - pedido do Rafael 08/09: fechar o gap da secao 'Passagem pra revisar' em Urgencias, mas SEM virar so' um checkbox que apaga - ele pediu 'nao deixe gerar pendencia... gerar banco de dados historico pra melhorias no futuro'. schema_v0.29 (nova tabela viajai.revisao_passagem, nunca apagada) + RPC viajai_marcar_passagem_revisada + viajai_listar_revisoes_passagem; viajai_folga_passagem_para_revisar agora exclui quem ja foi revisado (nao acumula pendencia), mas o registro fica pra sempre no historico (analisavel por mes depois). Nova capacidade - ver 00-handoff.md do VIAJAI no vault
 # Gestão de folgas, deslocamento e custo de funcionários em obra — EnerMais.
 #
 # Reaproveita o padrão validado em produção do TIA.go/RHDADOS:
@@ -65,7 +65,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v16.5"
+VERSAO_APP = "v17.0"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -2159,9 +2159,11 @@ def _montar_system_prompt_viajai(usuario_email):
         "oriente a usar a tela correspondente. Duas acoes existem SO na tela, sem ferramenta de "
         "chat pra executar (voce pode explicar que existem e orientar onde estao, mas nao tem "
         "como fazer por voce): 'reprocessar pendencias de import' (botao na tela 'Importar "
-        "RE090', tenta casar de novo contra o RH atual sem precisar reupload) e 'atribuir "
+        "RE090', tenta casar de novo contra o RH atual sem precisar reupload), 'atribuir "
         "colaborador' a um lancamento rapido que ficou sem pessoa/so com nome provisorio "
-        "(expander na aba 'Lancamento rapido', dentro de 'Custo & Passagens').\n\n"
+        "(expander na aba 'Lancamento rapido', dentro de 'Custo & Passagens') e 'marcar "
+        "passagem como revisada' (formulario na aba 'Urgencias', secao 'Passagem vinculada a "
+        "folga vendida/cancelada' - fica registrado pra sempre no historico dali).\n\n"
         "Se o usuario perguntar 'como funciona', 'o que voce consegue fazer', 'pra que serve "
         "essa tela/funcao' ou demonstrar duvida sobre o fluxo do Viaj.AI, EXPLIQUE em texto "
         "claro em vez de tentar chamar uma ferramenta - use como referencia o conteudo da aba "
@@ -2787,19 +2789,75 @@ def pagina_urgencias(supabase):
     st.divider()
     st.subheader("↩️ Passagem vinculada a folga vendida/cancelada")
     st.caption(
-        "Candidatas a revisar estorno/crédito com a companhia. Ainda não "
-        "tem botão de 'resolvido' aqui — o item só some da lista se você "
-        "corrigir/apagar o lançamento em Custo & Passagens (isso é uma "
-        "melhoria futura em aberto, não construída ainda)."
+        "Candidatas a revisar estorno/crédito com a companhia. Marque como "
+        "'revisada' quando resolver — o item some dessa lista (não acumula "
+        "pendência), mas o registro fica guardado pra sempre em **Histórico "
+        "de revisões** embaixo, com quem revisou e o resultado — dá pra "
+        "somar por mês depois (ex.: quanto se perdeu em passagem não "
+        "aproveitada)."
     )
     try:
         r3 = supabase.rpc("viajai_folga_passagem_para_revisar").execute()
         if r3.data:
-            st.dataframe(pd.DataFrame(r3.data), use_container_width=True, hide_index=True)
+            df_revisar = pd.DataFrame(r3.data)
+            st.dataframe(df_revisar, use_container_width=True, hide_index=True)
+
+            df_revisar["_rotulo"] = df_revisar.apply(
+                lambda r: (
+                    f"#{r['lancamento_id']} — {r['nome']} — {r['lancamento_origem']} -> "
+                    f"{r['lancamento_destino']} — R$ {r['lancamento_valor']:.2f} — folga {r['status_folga']}"
+                ),
+                axis=1,
+            )
+            with st.form("form_marcar_revisada"):
+                st.write("Marcar como revisada")
+                rotulo_rev = st.selectbox("Qual passagem?", df_revisar["_rotulo"], key="rev_select")
+                resultado_rev = st.selectbox(
+                    "Resultado",
+                    ["estorno_solicitado", "credito_recebido", "sem_acao_necessaria", "outro"],
+                    key="rev_resultado",
+                    help=(
+                        "estorno_solicitado = pediu o dinheiro de volta pra companhia; "
+                        "credito_recebido = ganhou crédito pra usar depois; "
+                        "sem_acao_necessaria = revisou e não precisa fazer nada; "
+                        "outro = explica na observação."
+                    ),
+                )
+                obs_rev = st.text_input("Observação (opcional)", key="rev_obs")
+                enviar_rev = st.form_submit_button("Marcar revisada")
+            if enviar_rev:
+                _linha_rev = df_revisar.loc[df_revisar["_rotulo"] == rotulo_rev].iloc[0]
+                try:
+                    supabase.rpc("viajai_marcar_passagem_revisada", {
+                        "p_lancamento_id": int(_linha_rev["lancamento_id"]),
+                        "p_resultado": resultado_rev,
+                        "p_observacao": obs_rev or None,
+                    }).execute()
+                    st.success("Marcada como revisada — guardada no histórico.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao marcar como revisada: {e}")
         else:
             st.success("Nenhuma passagem vinculada a folga vendida/cancelada pendente de revisão.")
     except Exception as e:
-        st.error(f"Não consegui consultar (rodou o schema_v0.24 no Supabase?) — {e}")
+        st.error(f"Não consegui consultar (rodou o schema_v0.29 no Supabase?) — {e}")
+
+    with st.expander("📜 Histórico de revisões (nunca apagado)"):
+        st.caption(
+            "Toda revisão marcada acima fica registrada aqui pra sempre — "
+            "quem revisou, quando e o resultado. Base pra olhar padrão por "
+            "mês depois (ex.: quanto se perdeu em passagem não aproveitada)."
+        )
+        try:
+            r3h = supabase.rpc("viajai_listar_revisoes_passagem", {"p_limite": 200}).execute()
+            if r3h.data:
+                df_hist_rev = pd.DataFrame(r3h.data)
+                st.dataframe(df_hist_rev, use_container_width=True, hide_index=True)
+                _botao_exportar_excel(df_hist_rev, "viajai_historico_revisoes_passagem.xlsx")
+            else:
+                st.caption("Nenhuma revisão registrada ainda.")
+        except Exception as e:
+            st.error(f"Não consegui consultar (rodou o schema_v0.29 no Supabase?) — {e}")
 
     st.divider()
     st.subheader("🪵 Últimos erros registrados")
@@ -2828,7 +2886,7 @@ def pagina_ajuda():
 2. **Confirmar folgas** — confirma folga em status "prevista", passando pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada".
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
 4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Na aba "Lançamento rápido", dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome.
-5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada), e os últimos erros registrados pelo sistema.
+5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — dá pra marcar como revisada, fica guardado num histórico permanente), e os últimos erros registrados pelo sistema.
 6. **Assistente** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
 
 ### O que o Assistente pode / não pode fazer
@@ -2849,6 +2907,7 @@ def pagina_ajuda():
 - Fórmula avançada de diária (pernoite, arredondamento) — usa fórmula simples por ora
 - Reprocessar pendências de import (botão na tela "Importar RE090")
 - Atribuir colaborador retroativo a um lançamento rápido (expander na aba "Lançamento rápido")
+- Marcar passagem como revisada (formulário na aba "Urgências", seção "Passagem pra revisar")
 
 ### Regra de ouro
 Você pede → o Assistente monta a proposta no painel lateral → **nada é gravado até você confirmar na tela**.
