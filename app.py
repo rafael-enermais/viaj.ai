@@ -1,3 +1,30 @@
+# Viaj.AI — v20.0 (evolucao estrutural: "Passagem pra revisar" alcancavel
+# de verdade - vincular lancamento/trecho a folga, via chat, tela e
+# retroativo - schema_v0.32)
+# ACHADO testando o v19.0 ao vivo (08/09): "Passagem pra revisar" (v0.29)
+# so' listava folga vendida/cancelada com lancamento_custo_rapido.folga_id
+# preenchido, mas NENHUM caminho do app (tela "Lançamento rápido" nem chat)
+# jamais preenchia esse campo (0 linhas no banco, sempre) - e passagem
+# lancada na aba "Por folga" (viagem/trecho) nunca era considerada de jeito
+# nenhum. A tela sempre mostrava "nenhuma pendente".
+# Pedido do Rafael (08/09), verbatim: "acho q tem q ser via chat e via
+# pagina de passagem pra revisar tb ne, da p implementar os 2?" -
+# confirmado (pergunta de esclarecimento respondida: as 3 frentes).
+# Mudancas: viajai_registrar_lancamento_rapido ganha p_folga_id opcional
+# (tela "Lançamento rápido" E chat, via card de confirmacao, com validacao
+# de colaborador<->folga no backend); viajai_folga_passagem_para_revisar
+# passa a UNIR os 2 sistemas de passagem (lancamento_custo_rapido E
+# viagem/trecho); nova RPC viajai_vincular_lancamento_folga pro vinculo
+# retroativo (novo expander em Urgências, pra quem ja lancou sem apontar a
+# folga); viajai.revisao_passagem (historico PERMANENTE, nunca dropada)
+# ganhou trecho_id como fonte alternativa a lancamento_id via ALTER TABLE
+# (tinha 0 linhas, conferido antes - ALTER seguro). Achado secundario sem
+# risco: existiam 2 overloads orfas de viajai_registrar_lancamento_rapido
+# no banco (uma bem antiga, nunca usada desde o schema_v0.27) - limpas
+# nesta mesma migracao. NAO RODA sem rodar schema_v0.32_viajai_vincular_
+# passagem_folga.txt no Supabase ANTES do deploy (varias RPCs mudam de
+# assinatura).
+#
 # Viaj.AI — v19.0 (evolucao estrutural: "Confirmar folgas" + chat cobrem
 # folga ja 'confirmada'/'em_andamento', nao so' 'prevista' - schema_v0.31)
 # Pedido do Rafael (08/09), em resposta ao achado de que nao existia
@@ -111,7 +138,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v19.0"
+VERSAO_APP = "v20.0"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1669,11 +1696,28 @@ def pagina_custo_passagens(supabase):
         st.caption(
             "Pra quando não dá pra apontar folga específica na hora "
             "(ex.: \"comprei 10 passagens do Ceará pra SP\") — serve pra "
-            "somar gasto por rota/período e ajudar a prever."
+            "somar gasto por rota/período e ajudar a prever. Se a compra "
+            "FOR de uma folga específica, dá pra vincular abaixo (opcional) "
+            "— assim, se essa folga depois for vendida/cancelada, ela "
+            "aparece em Urgências > \"Passagem pra revisar\"."
         )
         _colabs_resp_lr = supabase.rpc("viajai_colaboradores_ativos").execute()
         _colabs_opcoes_lr = ["— Lote / sem definir —"] + [c["nome"] for c in (_colabs_resp_lr.data or [])]
         _colabs_por_nome_lr = {c["nome"]: c["colaborador_id"] for c in (_colabs_resp_lr.data or [])}
+        # v20.0 (pedido do Rafael 08/09, "via chat e via pagina de passagem
+        # pra revisar tb"): lista de folgas em aberto (mesma RPC widened na
+        # v19.0) pra oferecer vinculo opcional aqui - o backend confere se
+        # o colaborador escolhido acima bate com o dono da folga escolhida
+        # aqui, entao nao precisa filtrar client-side pra ficar seguro.
+        _folgas_abertas_lr_resp = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 300}).execute()
+        _opcoes_folga_lr = ["— Nenhuma —"] + [
+            f"#{f['folga_id']} — {f['nome']} — {f.get('canteiro_nome') or '—'} — {f['status']}"
+            for f in (_folgas_abertas_lr_resp.data or [])
+        ]
+        _folga_id_por_rotulo_lr = {
+            f"#{f['folga_id']} — {f['nome']} — {f.get('canteiro_nome') or '—'} — {f['status']}": f["folga_id"]
+            for f in (_folgas_abertas_lr_resp.data or [])
+        }
         with st.form("form_lancamento_rapido"):
             c1, c2 = st.columns(2)
             origem_lr = c1.text_input("Origem", key="lr_origem")
@@ -1694,6 +1738,14 @@ def pagina_custo_passagens(supabase):
                     "colaborador real acima."
                 ),
             )
+            folga_lr = st.selectbox(
+                "Folga vinculada (opcional)", _opcoes_folga_lr, key="lr_folga",
+                help=(
+                    "Só se essa passagem for de uma folga específica — precisa "
+                    "ter escolhido o colaborador real acima (não dá com nome "
+                    "provisório) e ser a folga daquela mesma pessoa."
+                ),
+            )
             enviar_lr = st.form_submit_button("Registrar")
 
         if enviar_lr:
@@ -1711,6 +1763,7 @@ def pagina_custo_passagens(supabase):
                         "p_observacao": obs_lr or None,
                         "p_colaborador_id": _colabs_por_nome_lr.get(colab_lr),
                         "p_colaborador_nome_provisorio": nome_prov_lr or None,
+                        "p_folga_id": _folga_id_por_rotulo_lr.get(folga_lr),
                     }).execute()
                     _flash("success", "Lançamento registrado.")
                     st.rerun()
@@ -2565,6 +2618,20 @@ def pagina_chat(supabase):
             _colabs_lista = _colabs_resp.data or []
             _colabs_opcoes = ["— Lote / sem definir —"] + [c["nome"] for c in _colabs_lista]
             _colabs_por_nome = {c["nome"]: c["colaborador_id"] for c in _colabs_lista}
+            # v20.0: mesmo vinculo opcional de folga que existe na tela
+            # "Lançamento rápido" (Custo & Passagens), agora tambem no card
+            # de confirmacao do chat - pedido do Rafael 08/09 ("via chat e
+            # via pagina de passagem pra revisar tb"). O humano escolhe no
+            # dropdown, a IA nunca resolve folga_id sozinha.
+            _folgas_abertas_chat_resp = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 300}).execute()
+            _opcoes_folga_chat = ["— Nenhuma —"] + [
+                f"#{f['folga_id']} — {f['nome']} — {f.get('canteiro_nome') or '—'} — {f['status']}"
+                for f in (_folgas_abertas_chat_resp.data or [])
+            ]
+            _folga_id_por_rotulo_chat = {
+                f"#{f['folga_id']} — {f['nome']} — {f.get('canteiro_nome') or '—'} — {f['status']}": f["folga_id"]
+                for f in (_folgas_abertas_chat_resp.data or [])
+            }
 
             if len(propostas_lanc) > 1:
                 col_all_ok, col_all_no = st.columns(2)
@@ -2663,6 +2730,13 @@ def pagina_chat(supabase):
                         c_colab = st.selectbox(
                             "Colaborador (opcional)", _colabs_opcoes, index=_indice_colab_default, key=f"colab_{_pid}",
                         )
+                        c_folga = st.selectbox(
+                            "Folga vinculada (opcional)", _opcoes_folga_chat, key=f"folga_{_pid}",
+                            help=(
+                                "Só se essa passagem for de uma folga específica — precisa "
+                                "do colaborador real escolhido acima, dono dessa folga."
+                            ),
+                        )
                         col_ok, col_no = st.columns(2)
                         confirmar = col_ok.form_submit_button("✅ Confirmar e registrar", use_container_width=True)
                         cancelar = col_no.form_submit_button("Cancelar", use_container_width=True)
@@ -2674,6 +2748,7 @@ def pagina_chat(supabase):
                             "p_quantidade": int(c_qtd), "p_modal": c_modal,
                             "p_data": c_data.isoformat(), "p_observacao": c_obs or None,
                             "p_colaborador_id": _colab_id_confirmar,
+                            "p_folga_id": _folga_id_por_rotulo_chat.get(c_folga),
                         }).execute().data
                         st.session_state.propostas_pendentes_viajai = [
                             p for p in st.session_state.propostas_pendentes_viajai if p["id"] != _pid
@@ -3037,12 +3112,12 @@ def pagina_urgencias(supabase):
     st.divider()
     st.subheader("↩️ Passagem vinculada a folga vendida/cancelada")
     st.caption(
-        "Candidatas a revisar estorno/crédito com a companhia. Marque como "
-        "'revisada' quando resolver — o item some dessa lista (não acumula "
-        "pendência), mas o registro fica guardado pra sempre em **Histórico "
-        "de revisões** embaixo, com quem revisou e o resultado — dá pra "
-        "somar por mês depois (ex.: quanto se perdeu em passagem não "
-        "aproveitada)."
+        "Candidatas a revisar estorno/crédito com a companhia — tanto lançada em "
+        "'Lançamento rápido' (Custo & Passagens) quanto na aba 'Por folga', desde que "
+        "vinculada à folga. Marque como 'revisada' quando resolver — o item some dessa "
+        "lista (não acumula pendência), mas o registro fica guardado pra sempre em "
+        "**Histórico de revisões** embaixo, com quem revisou e o resultado — dá pra "
+        "somar por mês depois (ex.: quanto se perdeu em passagem não aproveitada)."
     )
     try:
         r3 = supabase.rpc("viajai_folga_passagem_para_revisar").execute()
@@ -3050,10 +3125,17 @@ def pagina_urgencias(supabase):
             df_revisar = pd.DataFrame(r3.data)
             st.dataframe(df_revisar, use_container_width=True, hide_index=True, placeholder="")
 
+            # v20.0: a lista agora mistura 2 fontes (fonte='lancamento_rapido'
+            # ou 'por_folga', schema_v0.32) - o rotulo usa o id da fonte certa
+            # (lancamento_id ou trecho_id) e o "marcar revisada" abaixo manda
+            # o parametro certo pra RPC de acordo com a fonte da linha
+            # escolhida (nunca os 2, nunca nenhum - a RPC valida isso tambem).
             df_revisar["_rotulo"] = df_revisar.apply(
                 lambda r: (
-                    f"#{r['lancamento_id']} — {r['nome']} — {r['lancamento_origem']} -> "
-                    f"{r['lancamento_destino']} — R$ {r['lancamento_valor']:.2f} — folga {r['status_folga']}"
+                    f"#{r['trecho_id'] if r['fonte'] == 'por_folga' else r['lancamento_id']} "
+                    f"({'Por folga' if r['fonte'] == 'por_folga' else 'Lançamento rápido'}) — "
+                    f"{r['nome']} — {r['origem']} -> {r['destino']} — R$ {r['valor']:.2f} — "
+                    f"folga {r['status_folga']}"
                 ),
                 axis=1,
             )
@@ -3075,12 +3157,13 @@ def pagina_urgencias(supabase):
                 enviar_rev = st.form_submit_button("Marcar revisada")
             if enviar_rev:
                 _linha_rev = df_revisar.loc[df_revisar["_rotulo"] == rotulo_rev].iloc[0]
+                _params_rev = {"p_resultado": resultado_rev, "p_observacao": obs_rev or None}
+                if _linha_rev["fonte"] == "por_folga":
+                    _params_rev["p_trecho_id"] = int(_linha_rev["trecho_id"])
+                else:
+                    _params_rev["p_lancamento_id"] = int(_linha_rev["lancamento_id"])
                 try:
-                    supabase.rpc("viajai_marcar_passagem_revisada", {
-                        "p_lancamento_id": int(_linha_rev["lancamento_id"]),
-                        "p_resultado": resultado_rev,
-                        "p_observacao": obs_rev or None,
-                    }).execute()
+                    supabase.rpc("viajai_marcar_passagem_revisada", _params_rev).execute()
                     _flash("success", "Marcada como revisada — guardada no histórico.")
                     st.rerun()
                 except Exception as e:
@@ -3088,7 +3171,55 @@ def pagina_urgencias(supabase):
         else:
             st.success("Nenhuma passagem vinculada a folga vendida/cancelada pendente de revisão.")
     except Exception as e:
-        st.error(f"Não consegui consultar (rodou o schema_v0.29 no Supabase?) — {e}")
+        st.error(f"Não consegui consultar (rodou o schema_v0.32 no Supabase?) — {e}")
+
+    with st.expander("🔗 Vincular lançamento existente a uma folga (retroativo)"):
+        st.caption(
+            "Pra quando a passagem já foi registrada em 'Lançamento rápido' sem apontar "
+            "a folga na hora — vincula depois pra ela aparecer em 'Passagem pra revisar' "
+            "acima, se/quando a folga for vendida ou cancelada. Só lançamentos com "
+            "colaborador real (não provisório) e ainda sem folga vinculada aparecem aqui; "
+            "só folga já vendida/cancelada do MESMO colaborador do lançamento pode ser "
+            "escolhida (a RPC confere isso também)."
+        )
+        try:
+            _lancs_todos_v = supabase.rpc("viajai_listar_lancamentos_rapidos", {"p_limite": 300}).execute().data or []
+            _lancs_sem_folga_v = [
+                l for l in _lancs_todos_v if not l.get("folga_id") and l.get("colaborador_id")
+            ]
+            _folgas_fechadas_v = supabase.rpc("viajai_listar_folgas_fechadas", {"p_limite": 300}).execute().data or []
+            if not _lancs_sem_folga_v:
+                st.caption("Nenhum lançamento (com colaborador real) sem folga vinculada no momento.")
+            elif not _folgas_fechadas_v:
+                st.caption("Nenhuma folga vendida/cancelada no momento.")
+            else:
+                _opcoes_lanc_v = {
+                    (
+                        f"#{l['id']} — {l.get('colaborador_nome') or '—'} — {l['origem']} -> "
+                        f"{l['destino']} — R$ {l['valor_total']:.2f} ({l['data']})"
+                    ): l["id"]
+                    for l in _lancs_sem_folga_v
+                }
+                _opcoes_folga_v = {
+                    f"#{f['folga_id']} — {f['nome']} — {f['status']}": f["folga_id"]
+                    for f in _folgas_fechadas_v
+                }
+                with st.form("form_vincular_lancamento_folga"):
+                    lanc_v = st.selectbox("Lançamento", list(_opcoes_lanc_v.keys()), key="vinc_lanc")
+                    folga_v = st.selectbox("Folga vendida/cancelada", list(_opcoes_folga_v.keys()), key="vinc_folga")
+                    enviar_v = st.form_submit_button("Vincular")
+                if enviar_v:
+                    try:
+                        supabase.rpc("viajai_vincular_lancamento_folga", {
+                            "p_lancamento_id": _opcoes_lanc_v[lanc_v],
+                            "p_folga_id": _opcoes_folga_v[folga_v],
+                        }).execute()
+                        _flash("success", "Lançamento vinculado à folga — já aparece em 'Passagem pra revisar' acima.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao vincular: {e}")
+        except Exception as e:
+            st.error(f"Não consegui consultar (rodou o schema_v0.32 no Supabase?) — {e}")
 
     with st.expander("📜 Histórico de revisões (nunca apagado)"):
         st.caption(
@@ -3133,8 +3264,8 @@ def pagina_ajuda():
 1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco. Sem match com o RH vira pendência (não trava nada); tem botão **"Reprocessar pendências"** pra tentar casar de novo mais tarde, sem reupload, quando o RH cadastrar a pessoa.
 2. **Confirmar folgas** — atualiza folga em aberto (status "prevista", "confirmada" ou "em_andamento") pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada" — inclusive folga que já tinha passagem comprada e depois foi vendida/cancelada.
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
-4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Aba "Por folga": adiciona trecho por trecho de uma mesma viagem (reenviar com o mesmo "Sentido" empilha na MESMA viagem, não cria outra) e dá pra marcar/desfazer reembolso de um trecho (some do gasto real, sem apagar o preço original). Aba "Lançamento rápido": dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome.
-5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — dá pra marcar como revisada, fica guardado num histórico permanente), e os últimos erros registrados pelo sistema.
+4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Aba "Por folga": adiciona trecho por trecho de uma mesma viagem (reenviar com o mesmo "Sentido" empilha na MESMA viagem, não cria outra) e dá pra marcar/desfazer reembolso de um trecho (some do gasto real, sem apagar o preço original). Aba "Lançamento rápido": dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome; também dá pra **vincular a uma folga específica** (opcional, tela e chat) — é o que faz essa passagem aparecer em "Passagem pra revisar" (Urgências) se a folga for vendida/cancelada depois.
+5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — cobre passagem lançada tanto em "Lançamento rápido" quanto em "Por folga", desde que vinculada à folga; dá pra marcar como revisada, fica guardado num histórico permanente; e dá pra vincular um lançamento antigo "solto" a uma folga retroativamente), e os últimos erros registrados pelo sistema.
 6. **Assistente** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
 
 ### O que o Assistente pode / não pode fazer
@@ -3156,6 +3287,7 @@ def pagina_ajuda():
 - Reprocessar pendências de import (botão na tela "Importar RE090")
 - Atribuir colaborador retroativo a um lançamento rápido (expander na aba "Lançamento rápido")
 - Marcar passagem como revisada (formulário na aba "Urgências", seção "Passagem pra revisar")
+- Vincular um lançamento antigo a uma folga retroativamente (expander na aba "Urgências")
 - Marcar/desfazer reembolso de um trecho (expander na aba "Por folga", dentro de "Custo & Passagens")
 
 ### Regra de ouro
