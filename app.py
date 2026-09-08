@@ -94,7 +94,6 @@
 # importar linha errada silenciosamente.
 
 import base64
-import threading
 import io
 import os
 import re
@@ -2262,9 +2261,6 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             )
             if "propostas_pendentes_viajai" not in st.session_state:
                 st.session_state.propostas_pendentes_viajai = []
-            st.session_state.setdefault("_debug_sid_viajai", []).append(
-                f"APPEND sid={id(st.session_state)} thread={threading.get_ident()}"
-            )
             st.session_state.propostas_pendentes_viajai.append({
                 "id": uuid.uuid4().hex[:8],
                 "tipo": "lancamento_rapido",
@@ -2612,8 +2608,6 @@ def pagina_chat(supabase):
         # so' o que sabe tratar; a lista guardada continua unica no session_state.
         propostas_lanc = [p for p in propostas if p.get("tipo", "lancamento_rapido") == "lancamento_rapido"]
         propostas_folga = [p for p in propostas if p.get("tipo") == "atualizar_folga"]
-        st.error(f"DEBUG-VIAJAI-TEMP: propostas_pendentes_viajai tem {len(propostas)} item(ns) neste render — remover depois do teste (Rafael 08/09).")
-        st.error(f"DEBUG-VIAJAI-TEMP2: RENDER sid={id(st.session_state)} thread={threading.get_ident()} debug_sid_log={st.session_state.get('_debug_sid_viajai', [])}")
         if propostas:
             st.warning(
                 f"{len(propostas)} proposta(s) aguardando confirmação — extraído da "
