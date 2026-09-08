@@ -2608,6 +2608,7 @@ def pagina_chat(supabase):
         # so' o que sabe tratar; a lista guardada continua unica no session_state.
         propostas_lanc = [p for p in propostas if p.get("tipo", "lancamento_rapido") == "lancamento_rapido"]
         propostas_folga = [p for p in propostas if p.get("tipo") == "atualizar_folga"]
+        st.error(f"DEBUG-VIAJAI-TEMP: propostas_pendentes_viajai tem {len(propostas)} item(ns) neste render — remover depois do teste (Rafael 08/09).")
         if propostas:
             st.warning(
                 f"{len(propostas)} proposta(s) aguardando confirmação — extraído da "
