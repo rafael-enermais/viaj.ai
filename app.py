@@ -139,7 +139,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v20.0"
+VERSAO_APP = "v21.1"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -430,6 +430,7 @@ TITULOS_RELATORIO_VIAJAI = {
     "consultar_resumo_custo_por_rota": "Resumo de custo por rota",
     "consultar_gasto_por_periodo": "Gasto por período",
     "consultar_lancamentos_rapidos": "Lançamentos rápidos recentes",
+    "consultar_historico_imports": "Histórico de imports",
     "consultar_localizacoes_canteiro": "Localizações de canteiro",
     "consultar_distancia_carro": "Distância de carro (Google Maps)",
     "consultar_link_skyscanner": "Link de busca (Skyscanner)",
@@ -875,9 +876,9 @@ def pagina_importar_re090(supabase):
         "'prevista', sem trecho de viagem associado); o resto fica registrado "
         "mas não é apagado, pra não perder trabalho já feito em cima."
     )
-    lotes = supabase.rpc("viajai_listar_import_batches", {"p_limite": 20}).execute()
+    lotes = supabase.rpc("viajai_listar_import_batches", {"p_limite": 200}).execute()
     if lotes.data:
-        for lote in lotes.data:
+        for lote in lotes.data[:20]:
             cols = st.columns([3, 2, 2, 2, 2])
             cols[0].write(f"{lote['nome_arquivo']}")
             cols[1].write(lote["criado_em"][:16].replace("T", " "))
@@ -897,6 +898,17 @@ def pagina_importar_re090(supabase):
                         f"{r.get('pendencias_removidas', 0)} pendência(s) removida(s)."
                     )
                     st.rerun()
+
+        with st.expander(f"📋 Consultar histórico completo ({len(lotes.data)} lote(s))"):
+            df_lotes = pd.DataFrame(lotes.data)
+            colunas_consulta = [c for c in [
+                "nome_arquivo", "criado_em", "criado_por", "total_linhas",
+                "total_criadas", "total_pendencias", "revertido",
+                "revertido_por", "revertido_em",
+            ] if c in df_lotes.columns]
+            df_lotes = df_lotes[colunas_consulta]
+            st.dataframe(df_lotes, hide_index=True, use_container_width=True, placeholder="")
+            _botao_exportar_excel(df_lotes, "viajai_historico_imports.xlsx")
     else:
         st.caption("Nenhum import feito ainda.")
 
@@ -2094,6 +2106,14 @@ TOOLS_VIAJAI = [
         },
     },
     {
+        "name": "consultar_historico_imports",
+        "description": "Historico de uploads da planilha RE090 (1 linha por upload): quando, quantas folgas criou, quantas pendencia, se foi revertido. Use para 'quantos imports fizemos', 'qual foi o ultimo import', 'historico de upload'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limite": {"type": "integer", "description": "Quantos lotes (padrao 200)"}},
+        },
+    },
+    {
         "name": "consultar_localizacoes_canteiro",
         "description": "Localizacao (cidade/UF/endereco/aeroporto mais proximo) dos canteiros que ja tem esse cadastro feito - nem todos tem ainda, e' alimentado aos poucos.",
         "input_schema": {"type": "object", "properties": {}},
@@ -2326,6 +2346,8 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
             r = supabase.rpc("viajai_gasto_por_periodo", {"p_meses": entrada.get("meses", 12)}).execute()
         elif nome == "consultar_lancamentos_rapidos":
             r = supabase.rpc("viajai_listar_lancamentos_rapidos", {"p_limite": entrada.get("limite", 200)}).execute()
+        elif nome == "consultar_historico_imports":
+            r = supabase.rpc("viajai_listar_import_batches", {"p_limite": entrada.get("limite", 200)}).execute()
         elif nome == "consultar_localizacoes_canteiro":
             r = supabase.rpc("viajai_listar_localizacoes_canteiro").execute()
         elif nome == "consultar_distancia_carro":
@@ -3384,6 +3406,7 @@ def pagina_ajuda():
 - Cálculo de diária de deslocamento (dias x valor fixo por tipo, fórmula simples)
 - Resumo de urgências (mesma lógica da aba "Urgências")
 - Pendências de import (lista, mas não reprocessa — isso é só na tela)
+- Histórico de imports (quando, quantas folgas criou, quantas pendência por upload)
 
 **Não faz (ainda) — só pela tela mesmo:**
 - Cadastrar colaborador novo — use a tela de cadastro do RH
