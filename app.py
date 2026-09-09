@@ -139,7 +139,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v21.2"
+VERSAO_APP = "v21.3"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1009,21 +1009,74 @@ def pagina_confirmar_folgas(supabase):
         "saiu, converteu os dias em pagamento e continua trabalhando; "
         "**cancelada** = a folga não vai mais acontecer."
     )
+    st.caption(
+        "Por padrão só aparece quem ainda está em aberto. Marque a caixa abaixo "
+        "pra também poder corrigir uma folga que já saiu daqui (realizada, "
+        "vendida ou cancelada) — o salvar funciona igual."
+    )
+
+    # v21.3 (pedido do Rafael 09/09: "se eu quiser atualizar uma folga
+    # passada, na qual o funcionario ja ate retornou, ou q nao esteja em
+    # confirmar folgas, nao tem como? / conseguimos deixar editavel?").
+    # ACHADO antes de mexer (regra-mae): viajai_atualizar_folga (RPC de
+    # escrita) NUNCA teve trava de status atual - aceita qualquer folga_id
+    # e status novo, sempre gravou certo. O gargalo era so' a LISTAGEM -
+    # viajai_listar_folgas_previstas so' traz prevista/confirmada/em_andamento
+    # de proposito (schema_v0.31). Fix: quando marcado, tambem busca em
+    # viajai_listar_folgas_desvio (ja existe desde schema_v0.9, cobre TODO
+    # status <> 'prevista' incluindo realizada/vendida/cancelada, mesmas
+    # colunas essenciais que essa tela ja usa) e mistura na mesma tabela -
+    # zero RPC nova, zero schema novo, mesmo botao Salvar/mesma RPC de escrita.
+    mostrar_fechadas = st.checkbox(
+        "Mostrar também folgas já concluídas (realizada/vendida/cancelada)",
+        key="cf_mostrar_fechadas",
+        help=(
+            "Pra corrigir uma folga que já passou (data errada, status errado, "
+            "esqueceu de marcar) mesmo depois dela sair desta lista. Salvar "
+            "funciona igual — o sistema nunca travou por status atual, só "
+            "não aparecia aqui por padrão."
+        ),
+    )
 
     previstas = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 300}).execute()
-    if not previstas.data:
-        st.caption("Nenhuma folga em aberto (prevista/confirmada/em_andamento) aguardando ação no momento.")
+    linhas = list(previstas.data or [])
+    _STATUS_ABERTOS = {"prevista", "confirmada", "em_andamento"}
+    if mostrar_fechadas:
+        try:
+            fechadas_resp = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 500}).execute()
+        except Exception as e:
+            fechadas_resp = None
+            st.error(f"Não consegui buscar as folgas concluídas (rodou o schema_v0.9 no Supabase?) — {e}")
+        if fechadas_resp and fechadas_resp.data:
+            _ids_ja_presentes = {int(l["folga_id"]) for l in linhas}
+            _colunas_comuns = [
+                "folga_id", "colaborador_id", "nome", "obra_nome", "canteiro_nome",
+                "status", "data_saida_prevista", "data_retorno_prevista",
+            ]
+            for l in fechadas_resp.data:
+                if l["status"] not in _STATUS_ABERTOS and int(l["folga_id"]) not in _ids_ja_presentes:
+                    linhas.append({k: l.get(k) for k in _colunas_comuns})
+
+    if not linhas:
+        if mostrar_fechadas:
+            st.caption("Nenhuma folga encontrada — nem em aberto, nem concluída/vendida/cancelada.")
+        else:
+            st.caption("Nenhuma folga em aberto (prevista/confirmada/em_andamento) aguardando ação no momento.")
     else:
-        base = pd.DataFrame(previstas.data)
-        # "atrasada" = data de saida prevista ja passou e ninguem confirmou
-        # nada ainda (pedido do Rafael: risco real de colaborador seguir na
-        # obra alem do previsto sem registro). So' compara com hoje, nao
-        # precisa de RPC nova.
+        base = pd.DataFrame(linhas)
+        # "atrasada" so' faz sentido pra quem ainda esta em aberto - uma
+        # folga ja realizada/vendida/cancelada nao e' um problema pendente,
+        # mesmo com data prevista no passado (e' o caso normal dela).
         _hoje = date.today()
         base["data_saida_prevista"] = pd.to_datetime(base["data_saida_prevista"]).dt.date
-        base["situacao"] = base["data_saida_prevista"].apply(
-            lambda d: "⚠️ atrasada" if pd.notna(d) and d < _hoje else "no prazo"
-        )
+
+        def _situacao(row):
+            if row["status"] not in _STATUS_ABERTOS:
+                return "🔒 concluída/fechada"
+            d = row["data_saida_prevista"]
+            return "⚠️ atrasada" if pd.notna(d) and d < _hoje else "no prazo"
+
+        base["situacao"] = base.apply(_situacao, axis=1)
 
         # urgencia (mesmo calculo da tela Previsao de folgas) trazida por
         # colaborador_id - pedido do Rafael: ajuda a Amanda a priorizar
@@ -1094,7 +1147,8 @@ def pagina_confirmar_folgas(supabase):
             column_config={
                 "status": st.column_config.TextColumn(
                     "🔒 Status atual", disabled=True,
-                    help="Status real da folga agora — prevista, confirmada ou em_andamento.",
+                    help="Status real da folga agora — inclui realizada/vendida/cancelada quando "
+                         "'Mostrar também folgas já concluídas' está marcado.",
                 ),
                 "situacao": st.column_config.TextColumn("🔒 Situação", disabled=True),
                 "urgencia": st.column_config.TextColumn(
@@ -1165,7 +1219,7 @@ def pagina_confirmar_folgas(supabase):
                     _flash("success", f"{sucesso} folga(s) atualizada(s).")
                 st.rerun()
 
-        st.caption(f"{len(previstas.data)} folga(s) prevista(s) aguardando confirmação.")
+        st.caption(f"{len(previstas.data or [])} folga(s) em aberto aguardando confirmação.")
 
     st.divider()
     st.subheader("Histórico")
