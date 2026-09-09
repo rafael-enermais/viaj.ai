@@ -1024,6 +1024,41 @@ def pagina_confirmar_folgas(supabase):
         else:
             base["urgencia"] = None
         base["urgencia"] = base["urgencia"].fillna("—")
+
+        # origem do import (schema_v0.33, pedido do Rafael 09/09: "lastro"
+        # por funcionario - de qual arquivo/planilha RE090 e quando veio
+        # essa folga). So' leitura, join simples por folga_id -> nao mexe
+        # em nenhuma RPC/tela existente, nao afeta performance.
+        try:
+            origem_resp = supabase.rpc(
+                "viajai_origem_folgas", {"p_folga_ids": base["folga_id"].astype(int).tolist()}
+            ).execute()
+        except Exception:
+            origem_resp = None
+        if origem_resp and origem_resp.data:
+            df_origem = pd.DataFrame(origem_resp.data)
+            base = base.merge(df_origem, on="folga_id", how="left")
+        else:
+            base["nome_planilha_origem"] = None
+            base["nome_arquivo"] = None
+            base["import_criado_em"] = None
+
+        def _fmt_origem(row):
+            if pd.isna(row.get("nome_arquivo")):
+                return "— (sem import registrado)"
+            data_txt = ""
+            if pd.notna(row.get("import_criado_em")):
+                try:
+                    data_txt = f" em {str(row['import_criado_em'])[:10]}"
+                except Exception:
+                    data_txt = ""
+            nome_txt = ""
+            if pd.notna(row.get("nome_planilha_origem")) and row["nome_planilha_origem"]:
+                nome_txt = f" (\"{row['nome_planilha_origem']}\" na planilha)"
+            return f"{row['nome_arquivo']}{data_txt}{nome_txt}"
+
+        base["origem_import"] = base.apply(_fmt_origem, axis=1)
+
         base = base.sort_values(by=["situacao", "data_saida_prevista"], ascending=[True, True])
         # v18.6 (pedido do Rafael 08/09, "deixa coberto, fluxo fluido"): antes
         # essa lista so' trazia folga 'prevista' e o default do dropdown era
@@ -1041,7 +1076,7 @@ def pagina_confirmar_folgas(supabase):
             base,
             column_order=[
                 "status", "situacao", "urgencia", "nome", "obra_nome", "canteiro_nome",
-                "data_saida_prevista", "data_retorno_prevista",
+                "data_saida_prevista", "data_retorno_prevista", "origem_import",
                 "status_novo", "data_saida_real", "data_retorno_real", "motivo_venda",
             ],
             column_config={
@@ -1059,6 +1094,10 @@ def pagina_confirmar_folgas(supabase):
                 "canteiro_nome": st.column_config.TextColumn("🔒 Canteiro", disabled=True),
                 "data_saida_prevista": st.column_config.DateColumn("🔒 Saída prevista", disabled=True),
                 "data_retorno_prevista": st.column_config.DateColumn("🔒 Retorno previsto", disabled=True),
+                "origem_import": st.column_config.TextColumn(
+                    "🔒 Origem do import", disabled=True,
+                    help="De qual import RE090 (arquivo + data) essa folga veio, e o nome exatamente como veio na planilha. '—' = folga anterior a essa rastreabilidade (schema_v0.33) ou criada sem import associado.",
+                ),
                 "status_novo": st.column_config.SelectboxColumn(
                     "✏️ Status novo", options=_STATUS_OPCOES, required=True,
                     help="Deixa igual ao 'Status atual' pra não mexer nessa linha.",
