@@ -1168,6 +1168,70 @@ def pagina_previsao(supabase):
         df["previsao_gasto"] = None
         df["base_previsao"] = "sem_dado"
 
+    # ===== Panorama geral (pedido do Rafael 09/09: "ver de forma facil e
+    # macroscopicamente todos os funcionarios... total, quantos de folga,
+    # quantos previsao, quantos ativos, etc") - so' consulta, nao edita
+    # aqui (edicao continua so' em "Confirmar folgas", pra nao duplicar
+    # aquela logica de salvar status/data em 2 lugares - decisao consciente
+    # de manter 1 caminho de escrita so'). Usa dado que o app ja busca
+    # nessa mesma tela (df, de viajai_previsao_folgas - cobre TODO ativo,
+    # nao so' quem tem folga em aberto) + viajai_listar_folgas_previstas
+    # (status de quem esta com folga aberta agora).
+    st.subheader("📊 Panorama geral — todos os colaboradores ativos")
+
+    _folgas_abertas_panorama = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 1000}).execute()
+    _status_por_colab = {}
+    if _folgas_abertas_panorama.data:
+        for _f in _folgas_abertas_panorama.data:
+            _status_por_colab[_f["colaborador_id"]] = _f["status"]
+
+    _total_ativos = len(df)
+    _qtd_em_andamento = sum(1 for s in _status_por_colab.values() if s == "em_andamento")
+    _qtd_aguardando = sum(1 for s in _status_por_colab.values() if s in ("prevista", "confirmada"))
+    _qtd_sem_historico = int((df["tem_historico"] == False).sum())  # noqa: E712
+
+    kpi_p1, kpi_p2, kpi_p3, kpi_p4 = st.columns(4)
+    kpi_p1.metric("Total de colaboradores ativos", _total_ativos)
+    kpi_p2.metric("De folga agora (em andamento)", _qtd_em_andamento)
+    kpi_p3.metric("Com folga prevista/confirmada", _qtd_aguardando)
+    kpi_p4.metric("Sem folga registrada ainda", _qtd_sem_historico)
+
+    def _situacao_panorama(row):
+        _status = _status_por_colab.get(row["colaborador_id"])
+        if _status == "em_andamento":
+            return "🚌 De folga agora"
+        if _status in ("prevista", "confirmada"):
+            return f"📅 Previsão ({_status})"
+        if not row["tem_historico"]:
+            return "— sem folga registrada"
+        return "✅ Ativo (última folga já encerrada)"
+
+    df_panorama = df.copy()
+    df_panorama["situação"] = df_panorama.apply(_situacao_panorama, axis=1)
+    df_panorama = df_panorama.sort_values(by=["situação", "nome"])
+
+    st.dataframe(
+        df_panorama[[
+            "nome", "situação", "obra_nome", "canteiro_nome",
+            "dias_restantes", "nivel_urgencia",
+        ]],
+        column_config={
+            "nome": "Nome",
+            "situação": "Situação",
+            "obra_nome": "Obra",
+            "canteiro_nome": "Canteiro",
+            "dias_restantes": "Dias restantes (estim.)",
+            "nivel_urgencia": "Urgência",
+        },
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption(
+        "Essa tabela é só consulta. Pra confirmar saída/retorno ou mudar "
+        "status de alguém, use a página **Confirmar folgas**."
+    )
+    st.divider()
+
     # painel resumido (pedido do Rafael: "dimensionar quantos funcionarios
     # precisarao de passagem nos proximos 30 dias" + gasto previsto) - usa
     # o df ANTES do filtro de "mostrar sem historico" (precisa de
