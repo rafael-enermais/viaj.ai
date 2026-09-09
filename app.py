@@ -3413,6 +3413,101 @@ Passagem comprada e folga são registros independentes — uma não abre/fecha a
     )
 
 
+def _rpc_dash_ou_vazio(supabase, nome_rpc, params):
+    """Helper so' pro Dashboard (schema_v0.34): RPC de leitura que pode
+    ainda nao existir (schema_v0.34 nao rodado) ou nao ter dado nenhum -
+    nos 2 casos, degrada pra lista vazia em vez de quebrar a tela."""
+    try:
+        resp = supabase.rpc(nome_rpc, params).execute()
+        return resp.data or []
+    except Exception:
+        return []
+
+
+def pagina_dashboard(supabase):
+    st.subheader("Dashboard")
+    st.caption(
+        "Métricas de custo e comportamento ao longo do tempo — evolui "
+        "sozinho conforme a base populate com uso real (schema_v0.34). "
+        "Com pouco dado (ex.: logo após a entrega, base zerada), os "
+        "gráficos aparecem vazios — normal, não é erro."
+    )
+
+    p_meses = st.selectbox(
+        "Período", [3, 6, 12, 24], index=2,
+        format_func=lambda n: f"Últimos {n} meses",
+    )
+
+    st.divider()
+    st.markdown("### 💰 Custo por mês")
+    st.caption("Soma passagem (líquida de reembolso) + gasto extra + lançamento rápido.")
+    dados = _rpc_dash_ou_vazio(supabase, "viajai_dash_custo_mensal", {"p_meses": p_meses})
+    if dados:
+        df = pd.DataFrame(dados)
+        st.bar_chart(df.set_index("mes")[["custo_passagens", "custo_gastos", "custo_lancamento_rapido"]])
+        _botao_exportar_excel(df, "viajai_dash_custo_mensal.xlsx")
+    else:
+        st.caption("Ainda não há dado suficiente nesse período.")
+
+    st.divider()
+    st.markdown("### 🏗️ Custo por obra")
+    st.caption(
+        "Passagem/gasto lançados em 'Por folga' usam a obra de quando a "
+        "folga aconteceu. 'Lançamento rápido' sem folga vinculada usa a "
+        "obra ATUAL do colaborador no RH — pode errar se ele trocou de "
+        "obra depois do gasto."
+    )
+    dados = _rpc_dash_ou_vazio(supabase, "viajai_dash_custo_por_obra", {"p_meses": p_meses})
+    if dados:
+        df = pd.DataFrame(dados)
+        st.bar_chart(df.set_index("obra_nome")[["custo_total"]])
+        _botao_exportar_excel(df, "viajai_dash_custo_por_obra.xlsx")
+    else:
+        st.caption("Ainda não há dado suficiente nesse período.")
+
+    st.divider()
+    st.markdown("### 📅 Sazonalidade — quantidade de folga por mês")
+    dados = _rpc_dash_ou_vazio(supabase, "viajai_dash_sazonalidade_folga", {"p_meses": p_meses})
+    if dados:
+        df = pd.DataFrame(dados)
+        st.bar_chart(df.set_index("mes")[["quantidade"]])
+        _botao_exportar_excel(df, "viajai_dash_sazonalidade_folga.xlsx")
+    else:
+        st.caption("Ainda não há dado suficiente nesse período.")
+
+    st.divider()
+    st.markdown("### ⏱️ Delay de envio do RE090, por obra")
+    st.caption(
+        "Dias entre a data em que a folga precisava ser informada (saída "
+        "prevista) e a data em que o import RE090 chegou. Só conta folga "
+        "criada por import — lançada manualmente não tem 'envio de "
+        "planilha' pra medir."
+    )
+    dados = _rpc_dash_ou_vazio(supabase, "viajai_dash_delay_envio_re090", {"p_meses": p_meses})
+    if dados:
+        df = pd.DataFrame(dados)
+        st.bar_chart(df.set_index("obra_nome")[["delay_medio_dias"]])
+        st.dataframe(df, hide_index=True, use_container_width=True, placeholder="")
+        _botao_exportar_excel(df, "viajai_dash_delay_envio.xlsx")
+    else:
+        st.caption("Ainda não há dado suficiente nesse período.")
+
+    st.divider()
+    st.markdown("### ✈️ Prazo de compra de passagem")
+    st.caption(
+        "Dias de antecedência entre a compra e a data da viagem. Só "
+        "considera passagem lançada em 'Por folga' (tem campo de data de "
+        "compra) — 'Lançamento rápido' não tem esse dado."
+    )
+    dados = _rpc_dash_ou_vazio(supabase, "viajai_dash_prazo_compra_passagem", {"p_meses": p_meses})
+    if dados:
+        df = pd.DataFrame(dados)
+        st.line_chart(df.set_index("mes")[["prazo_medio_dias"]])
+        _botao_exportar_excel(df, "viajai_dash_prazo_compra.xlsx")
+    else:
+        st.caption("Ainda não há dado suficiente nesse período.")
+
+
 def main():
     if "sessao" not in st.session_state:
         tela_login()
@@ -3450,7 +3545,7 @@ def main():
         st.write(f"Logado como: {st.session_state.usuario}")
         pagina = st.radio(
             "Navegação",
-            ["Importar RE090", "Confirmar folgas", "Urgências", "Previsão de folgas", "Custo & Passagens", "Central de Ajuda", "Assistente"],
+            ["Importar RE090", "Confirmar folgas", "Urgências", "Previsão de folgas", "Custo & Passagens", "Dashboard", "Central de Ajuda", "Assistente"],
         )
         if st.button("Sair"):
             supabase.auth.sign_out()
@@ -3488,6 +3583,8 @@ def main():
         pagina_previsao(supabase)
     elif pagina == "Custo & Passagens":
         pagina_custo_passagens(supabase)
+    elif pagina == "Dashboard":
+        pagina_dashboard(supabase)
     elif pagina == "Central de Ajuda":
         pagina_ajuda()
     elif pagina == "Assistente":
