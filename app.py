@@ -97,6 +97,7 @@ import base64
 import io
 import os
 import re
+import time
 import unicodedata
 import uuid
 from datetime import date, datetime
@@ -3318,6 +3319,27 @@ def main():
     # cliente do zero a cada interação, sem isso a consulta vai como anônimo
     # e a RLS devolve vazio sem erro nenhum).
     supabase = get_client()
+
+    # NOVO 09/09/2026 (achado testando com o Rafael - tela vermelha generica
+    # em "Assistente" E "Confirmar folgas" apos uso prolongado): access_token
+    # e' um JWT com validade curta (padrao Supabase Auth, geralmente ~1h) -
+    # sem refresh, toda chamada RPC em QUALQUER pagina passa a falhar com
+    # "JWT expired" (postgrest APIError code PGRST303) depois de logado por
+    # muito tempo, nao tem nada a ver com o que a pessoa esta fazendo no chat
+    # ou em qualquer tela especifica. Refresh proativo usando o
+    # refresh_token antes do access_token expirar (60s de folga).
+    _expira_em_viajai = getattr(st.session_state.sessao, "expires_at", None)
+    if _expira_em_viajai and time.time() > _expira_em_viajai - 60:
+        try:
+            _nova_sessao_viajai = supabase.auth.refresh_session(
+                st.session_state.sessao.refresh_token
+            )
+            if _nova_sessao_viajai.session:
+                st.session_state.sessao = _nova_sessao_viajai.session
+        except Exception:
+            pass  # refresh falhou - segue com o token atual, se ainda for
+            # o problema a proxima RPC que falhar vai indicar de novo
+
     supabase.postgrest.auth(st.session_state.sessao.access_token)
 
     with st.sidebar:
