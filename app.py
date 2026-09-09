@@ -139,7 +139,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v21.1"
+VERSAO_APP = "v21.2"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -3201,6 +3201,32 @@ def pagina_urgencias(supabase):
         "cruzado direto."
     )
 
+    # v21.2 (schema_v0.35, pedido do Rafael 09/09: "vincular as urgências
+    # tb com o histórico de import, é possível?") - as 2 RPCs de folga
+    # (sem passagem / pra revisar) ja trazem import_batch_id/nome_arquivo_
+    # origem/import_criado_em/nome_planilha_origem prontos (join feito no
+    # banco); aqui so' formata num texto so' pra ficar legivel, mesmo
+    # padrao "Origem do import" ja usado em Confirmar folgas (schema_v0.33).
+    def _fmt_origem_urgencia(row):
+        if pd.isna(row.get("nome_arquivo_origem")):
+            return "— (sem import registrado)"
+        data_txt = ""
+        if pd.notna(row.get("import_criado_em")):
+            try:
+                data_txt = f" em {str(row['import_criado_em'])[:10]}"
+            except Exception:
+                data_txt = ""
+        nome_txt = ""
+        if pd.notna(row.get("nome_planilha_origem")) and row["nome_planilha_origem"]:
+            nome_txt = f" (\"{row['nome_planilha_origem']}\" na planilha)"
+        return f"{row['nome_arquivo_origem']}{data_txt}{nome_txt}"
+
+    _HELP_ORIGEM_IMPORT = (
+        "De qual import RE090 (arquivo + data) essa folga veio, e o nome "
+        "exatamente como veio na planilha (schema_v0.35). '—' = folga sem "
+        "import associado (criada antes da rastreabilidade ou por outro caminho)."
+    )
+
     st.subheader("🚨 Folgas chegando sem passagem lançada")
     st.caption(
         "O que fazer: lance a passagem em **Custo & Passagens** (aba "
@@ -3211,7 +3237,29 @@ def pagina_urgencias(supabase):
     try:
         r1 = supabase.rpc("viajai_folgas_sem_passagem", {"p_dias_janela": 10}).execute()
         if r1.data:
-            st.dataframe(pd.DataFrame(r1.data), use_container_width=True, hide_index=True, placeholder="")
+            df1 = pd.DataFrame(r1.data)
+            df1["origem_import"] = df1.apply(_fmt_origem_urgencia, axis=1)
+            st.dataframe(
+                df1,
+                column_order=[
+                    "nome", "obra_nome", "canteiro_nome",
+                    "data_saida_prevista", "dias_restantes", "origem_import",
+                ],
+                column_config={
+                    "nome": st.column_config.TextColumn("🔒 Nome"),
+                    "obra_nome": st.column_config.TextColumn("🔒 Obra"),
+                    "canteiro_nome": st.column_config.TextColumn("🔒 Canteiro"),
+                    "data_saida_prevista": st.column_config.DateColumn("🔒 Saída prevista"),
+                    "dias_restantes": st.column_config.NumberColumn(
+                        "🔒 Dias restantes",
+                        help="Negativo = já passou da data prevista de saída — mais urgente.",
+                    ),
+                    "origem_import": st.column_config.TextColumn(
+                        "🔒 Origem do import", help=_HELP_ORIGEM_IMPORT,
+                    ),
+                },
+                use_container_width=True, hide_index=True, placeholder="",
+            )
         else:
             st.success("Nenhuma folga nos próximos 10 dias sem passagem lançada.")
     except Exception as e:
@@ -3229,7 +3277,31 @@ def pagina_urgencias(supabase):
             "viajai_alerta_preco_fora_padrao", {"p_dias_janela": 30, "p_desvio_pct": 0.4}
         ).execute()
         if r2.data:
-            st.dataframe(pd.DataFrame(r2.data), use_container_width=True, hide_index=True, placeholder="")
+            df2 = pd.DataFrame(r2.data)
+            df2["desvio_pct"] = df2["desvio_pct"] * 100
+            st.dataframe(
+                df2,
+                column_order=[
+                    "data", "colaborador_nome", "origem", "destino",
+                    "valor_unitario", "media_rota", "desvio_pct", "amostras_rota",
+                ],
+                column_config={
+                    "data": st.column_config.DateColumn("🔒 Data"),
+                    "colaborador_nome": st.column_config.TextColumn("🔒 Colaborador"),
+                    "origem": st.column_config.TextColumn("🔒 Origem"),
+                    "destino": st.column_config.TextColumn("🔒 Destino"),
+                    "valor_unitario": st.column_config.NumberColumn("🔒 Valor pago (R$)", format="R$ %.2f"),
+                    "media_rota": st.column_config.NumberColumn("🔒 Média da rota (R$)", format="R$ %.2f"),
+                    "desvio_pct": st.column_config.NumberColumn(
+                        "🔒 Desvio", format="%.0f%%",
+                        help="Quanto esse valor está acima/abaixo da média histórica da mesma rota.",
+                    ),
+                    "amostras_rota": st.column_config.NumberColumn(
+                        "🔒 Amostras da rota", help="Quantos lançamentos dessa rota entraram na média.",
+                    ),
+                },
+                use_container_width=True, hide_index=True, placeholder="",
+            )
         else:
             st.success("Nenhum lançamento recente fora do padrão histórico da rota (desvio ≥ 40%).")
     except Exception as e:
@@ -3249,7 +3321,35 @@ def pagina_urgencias(supabase):
         r3 = supabase.rpc("viajai_folga_passagem_para_revisar").execute()
         if r3.data:
             df_revisar = pd.DataFrame(r3.data)
-            st.dataframe(df_revisar, use_container_width=True, hide_index=True, placeholder="")
+            df_revisar["origem_import"] = df_revisar.apply(_fmt_origem_urgencia, axis=1)
+            st.dataframe(
+                df_revisar,
+                column_order=[
+                    "nome", "status_folga", "motivo_venda", "fonte",
+                    "lancamento_id", "trecho_id", "data", "valor",
+                    "origem", "destino", "origem_import",
+                ],
+                column_config={
+                    "nome": st.column_config.TextColumn("🔒 Nome"),
+                    "status_folga": st.column_config.TextColumn("🔒 Status da folga"),
+                    "motivo_venda": st.column_config.TextColumn("🔒 Motivo (se vendida)"),
+                    "fonte": st.column_config.TextColumn(
+                        "🔒 Fonte",
+                        help="lancamento_rapido = lançado em Custo & Passagens > Lançamento rápido; "
+                             "por_folga = lançado em Custo & Passagens > Por folga.",
+                    ),
+                    "lancamento_id": st.column_config.NumberColumn("🔒 Lançamento nº", format="%d"),
+                    "trecho_id": st.column_config.NumberColumn("🔒 Trecho nº", format="%d"),
+                    "data": st.column_config.DateColumn("🔒 Data"),
+                    "valor": st.column_config.NumberColumn("🔒 Valor (R$)", format="R$ %.2f"),
+                    "origem": st.column_config.TextColumn("🔒 Origem"),
+                    "destino": st.column_config.TextColumn("🔒 Destino"),
+                    "origem_import": st.column_config.TextColumn(
+                        "🔒 Origem do import", help=_HELP_ORIGEM_IMPORT,
+                    ),
+                },
+                use_container_width=True, hide_index=True, placeholder="",
+            )
 
             # v20.0: a lista agora mistura 2 fontes (fonte='lancamento_rapido'
             # ou 'por_folga', schema_v0.32) - o rotulo usa o id da fonte certa
@@ -3357,7 +3457,28 @@ def pagina_urgencias(supabase):
             r3h = supabase.rpc("viajai_listar_revisoes_passagem", {"p_limite": 200}).execute()
             if r3h.data:
                 df_hist_rev = pd.DataFrame(r3h.data)
-                st.dataframe(df_hist_rev, use_container_width=True, hide_index=True, placeholder="")
+                st.dataframe(
+                    df_hist_rev,
+                    column_order=[
+                        "revisado_em", "colaborador_nome", "resultado", "observacao",
+                        "fonte", "lancamento_id", "trecho_id", "origem", "destino",
+                        "valor", "revisado_por",
+                    ],
+                    column_config={
+                        "revisado_em": st.column_config.DatetimeColumn("🔒 Revisado em"),
+                        "colaborador_nome": st.column_config.TextColumn("🔒 Colaborador"),
+                        "resultado": st.column_config.TextColumn("🔒 Resultado"),
+                        "observacao": st.column_config.TextColumn("🔒 Observação"),
+                        "fonte": st.column_config.TextColumn("🔒 Fonte"),
+                        "lancamento_id": st.column_config.NumberColumn("🔒 Lançamento nº", format="%d"),
+                        "trecho_id": st.column_config.NumberColumn("🔒 Trecho nº", format="%d"),
+                        "origem": st.column_config.TextColumn("🔒 Origem"),
+                        "destino": st.column_config.TextColumn("🔒 Destino"),
+                        "valor": st.column_config.NumberColumn("🔒 Valor (R$)", format="R$ %.2f"),
+                        "revisado_por": st.column_config.TextColumn("🔒 Revisado por"),
+                    },
+                    use_container_width=True, hide_index=True, placeholder="",
+                )
                 _botao_exportar_excel(df_hist_rev, "viajai_historico_revisoes_passagem.xlsx")
             else:
                 st.caption("Nenhuma revisão registrada ainda.")
@@ -3375,7 +3496,19 @@ def pagina_urgencias(supabase):
     try:
         r4 = supabase.rpc("viajai_listar_log_erro", {"p_limite": 20}).execute()
         if r4.data:
-            st.dataframe(pd.DataFrame(r4.data), use_container_width=True, hide_index=True, placeholder="")
+            st.dataframe(
+                pd.DataFrame(r4.data),
+                column_order=["criado_em", "ferramenta", "mensagem_erro", "usuario", "contexto", "entrada"],
+                column_config={
+                    "criado_em": st.column_config.DatetimeColumn("🔒 Quando"),
+                    "ferramenta": st.column_config.TextColumn("🔒 Ferramenta"),
+                    "mensagem_erro": st.column_config.TextColumn("🔒 Erro"),
+                    "usuario": st.column_config.TextColumn("🔒 Usuário"),
+                    "contexto": st.column_config.TextColumn("🔒 Contexto"),
+                    "entrada": st.column_config.TextColumn("🔒 Entrada (dados)"),
+                },
+                use_container_width=True, hide_index=True, placeholder="",
+            )
         else:
             st.success("Nenhum erro registrado.")
     except Exception as e:
