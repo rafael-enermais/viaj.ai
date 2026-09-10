@@ -139,7 +139,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v22.0"
+VERSAO_APP = "v22.2"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -418,6 +418,43 @@ def _botao_exportar_excel(df, nome_arquivo, label="Exportar Excel"):
     )
 
 
+def _obter_cidades_usadas(supabase):
+    """Lista de cidades ja usadas em origem/destino, dedup e normalizada
+    (schema_v0.37/v0.38) - usada pra sugerir preenchimento nos formularios
+    de trecho/lancamento rapido. Pedido do Rafael (10/09): 'da pra deixar
+    sugerido o preenchimento correto? tem muitos erros (eu que fiz) e vai
+    dar numeros falsos futuramente' - ataca a causa raiz da duplicidade no
+    Resumo por rota (schema_v0.36/v0.37 so corrigiam o relatorio com o
+    que ja tinha sido digitado; isso aqui evita variacao NOVA). Buscada 1x
+    por carregamento de pagina - lista pequena, nao precisa de cache."""
+    try:
+        r = supabase.rpc("viajai_listar_cidades_usadas").execute()
+        return [row["cidade"] for row in (r.data or []) if row.get("cidade")]
+    except Exception:
+        return []
+
+
+_SENTINELA_NOVA_CIDADE = "✏️ Digitar outra (não está na lista)"
+
+
+def _input_cidade_com_sugestao(coluna, label, key, cidades_existentes, valor_atual=None):
+    """Campo de Origem/Destino com sugestao das cidades ja usadas antes,
+    mais opcao de digitar uma nova - sem travar quem precisa de cidade
+    que ainda nao existe na lista. Fica FORA do st.form (respostas de
+    selectbox dentro de um form so atualizam a tela no submit - aqui
+    precisa reagir na hora pra mostrar/esconder o campo de texto livre),
+    por isso recebe a coluna (st ou st.columns(...)[i]) como parametro em
+    vez de ser chamado direto dentro do form."""
+    opcoes = [_SENTINELA_NOVA_CIDADE] + cidades_existentes
+    indice_padrao = 0
+    if valor_atual and valor_atual in cidades_existentes:
+        indice_padrao = opcoes.index(valor_atual)
+    escolha = coluna.selectbox(label, opcoes, index=indice_padrao, key=f"{key}_select")
+    if escolha == _SENTINELA_NOVA_CIDADE:
+        return coluna.text_input(f"{label} (nova)", value=(valor_atual or ""), key=f"{key}_novo")
+    return escolha
+
+
 TITULOS_RELATORIO_VIAJAI = {
     "consultar_previsao_folgas": "Previsão de folgas",
     "consultar_pendencias_import": "Pendências de import",
@@ -474,6 +511,46 @@ def _renderizar_urgencias_dash(resultado):
             st.dataframe(pd.DataFrame(_linhas), use_container_width=True, hide_index=True, placeholder="")
         else:
             st.caption("Nenhum registro.")
+
+
+def _renderizar_tabela_resultado_viajai(tool, df_dash):
+    """Tabela padrao do painel/analise do chat - por padrao so' joga todas
+    as colunas cruas da RPC (generico, serve pra qualquer ferramenta), mas
+    pra ferramentas especificas com colunas dificeis de ler cru, aplica
+    column_order/column_config dedicado (pedido do Rafael 10/09:
+    'consultar_previsao_folgas' escondia 'dias_restantes' no meio de 13
+    colunas tecnicas - mesma info que ja aparece com rotulo bonito na
+    pagina 'Previsao de folgas', so' faltava aqui). Extraido pra funcao
+    unica porque o painel de baixo (1 consulta) e o quadro de analise
+    (varias consultas da mesma pergunta) usam exatamente a mesma logica -
+    sem essa funcao, ia duplicar o mesmo column_config nos 2 lugares."""
+    if tool == "consultar_previsao_folgas" and "dias_restantes" in df_dash.columns:
+        _ordem = [
+            "nome", "dias_restantes", "nivel_urgencia",
+            "data_saida_prevista", "data_retorno_prevista",
+            "obra_nome", "canteiro_nome",
+        ]
+        _ordem = [c for c in _ordem if c in df_dash.columns]
+        _outras = [c for c in df_dash.columns if c not in _ordem]
+        st.dataframe(
+            df_dash[_ordem + _outras],
+            column_config={
+                "nome": "Nome",
+                "dias_restantes": st.column_config.NumberColumn(
+                    "Dias restantes (estim.)",
+                    help="Positivo = faltam N dias pra sair de folga. Negativo = já passou N dias do previsto.",
+                    format="%d",
+                ),
+                "nivel_urgencia": "Urgência",
+                "data_saida_prevista": "Saída prevista",
+                "data_retorno_prevista": "Retorno previsto",
+                "obra_nome": "Obra",
+                "canteiro_nome": "Canteiro",
+            },
+            use_container_width=True, hide_index=True, placeholder="",
+        )
+    else:
+        st.dataframe(df_dash, use_container_width=True, hide_index=True, placeholder="")
 
 
 REPORTS_RAPIDOS_VIAJAI = [
@@ -1510,6 +1587,7 @@ def pagina_custo_passagens(supabase):
         "02/09 — ver 00-handoff): a inteligência aqui é o histórico que a "
         "própria Amanda for alimentando, cresce com o uso."
     )
+    cidades_usadas = _obter_cidades_usadas(supabase)
 
     with st.expander("🔎 Consultar histórico da rota (antes de comprar)"):
         st.caption(
@@ -1682,14 +1760,16 @@ def pagina_custo_passagens(supabase):
                 )
             else:
                 st.caption(f"➡️ Ainda não existe viagem de '{sentido}' pra essa folga — isso vai criar a primeira.")
+            # Origem/Destino ficam FORA do form de propósito (selectbox
+            # dentro de form so' reage no submit - ver _input_cidade_com_sugestao).
+            c3, c4 = st.columns(2)
+            origem_t = _input_cidade_com_sugestao(c3, "Origem", "trecho_origem", cidades_usadas)
+            destino_t = _input_cidade_com_sugestao(c4, "Destino", "trecho_destino", cidades_usadas)
             with st.form("form_add_trecho"):
                 st.caption("Só o essencial aqui — o resto é opcional, fica em 'Mais detalhes'.")
                 c1, c2 = st.columns(2)
                 modal = c1.selectbox("Modal", ["aviao", "onibus", "carro", "taxi", "outro"])
                 data_t = c2.date_input("Data da viagem", value=date.today(), key="trecho_data")
-                c3, c4 = st.columns(2)
-                origem_t = c3.text_input("Origem", key="trecho_origem")
-                destino_t = c4.text_input("Destino", key="trecho_destino")
                 preco_t = st.number_input("Preço (R$)", min_value=0.0, step=0.01, format="%.2f")
 
                 with st.expander("Mais detalhes (opcional)"):
@@ -1860,10 +1940,12 @@ def pagina_custo_passagens(supabase):
             f"#{f['folga_id']} — {f['nome']} — {f.get('canteiro_nome') or '—'} — {f['status']}": f["folga_id"]
             for f in (_folgas_abertas_lr_resp.data or [])
         }
+        # Origem/Destino ficam FORA do form de propósito (selectbox
+        # dentro de form so' reage no submit - ver _input_cidade_com_sugestao).
+        c1, c2 = st.columns(2)
+        origem_lr = _input_cidade_com_sugestao(c1, "Origem", "lr_origem", cidades_usadas)
+        destino_lr = _input_cidade_com_sugestao(c2, "Destino", "lr_destino", cidades_usadas)
         with st.form("form_lancamento_rapido"):
-            c1, c2 = st.columns(2)
-            origem_lr = c1.text_input("Origem", key="lr_origem")
-            destino_lr = c2.text_input("Destino", key="lr_destino")
             c3, c4, c5 = st.columns(3)
             modal_lr = c3.selectbox("Modal", ["aviao", "onibus", "carro", "taxi", "outro"], key="lr_modal")
             qtd_lr = c4.number_input("Quantidade de passagens", min_value=1, value=1, step=1, key="lr_qtd")
@@ -2686,6 +2768,8 @@ def pagina_chat(supabase):
         "em vez de confiar numa resposta antiga."
     )
 
+    cidades_usadas = _obter_cidades_usadas(supabase)
+
     # atalhos de relatorio (pedido do Rafael 03/09) ficam ANTES do check da
     # chave Anthropic de proposito: chamam a RPC direto, nunca passam pela IA,
     # entao nao dependem de ANTHROPIC_API_KEY pra funcionar.
@@ -2858,9 +2942,16 @@ def pagina_chat(supabase):
                     _indice_colab_default = 0
                     if acao.get("colaborador_nome") and acao["colaborador_nome"] in _colabs_opcoes:
                         _indice_colab_default = _colabs_opcoes.index(acao["colaborador_nome"])
+                    # Origem/Destino ficam FORA do form de propósito
+                    # (selectbox dentro de form so' reage no submit - ver
+                    # _input_cidade_com_sugestao).
+                    c_origem = _input_cidade_com_sugestao(
+                        st, "Origem", f"origem_{_pid}", cidades_usadas, valor_atual=acao["origem"],
+                    )
+                    c_destino = _input_cidade_com_sugestao(
+                        st, "Destino", f"destino_{_pid}", cidades_usadas, valor_atual=acao["destino"],
+                    )
                     with st.form(f"form_confirmar_lancamento_ia_{_pid}"):
-                        c_origem = st.text_input("Origem", value=acao["origem"], key=f"origem_{_pid}")
-                        c_destino = st.text_input("Destino", value=acao["destino"], key=f"destino_{_pid}")
                         c_valor = st.number_input(
                             "Valor total (R$)", value=float(acao["valor_total"]), min_value=0.0,
                             step=0.01, key=f"valor_{_pid}",
@@ -3057,8 +3148,7 @@ def pagina_chat(supabase):
             elif not isinstance(resultado, list) or not resultado:
                 st.write(resultado if resultado else "(sem dado pra essa consulta)")
             else:
-                df_dash = pd.DataFrame(resultado)
-                st.dataframe(df_dash, use_container_width=True, hide_index=True, placeholder="")
+                _renderizar_tabela_resultado_viajai(extra.get("tool"), pd.DataFrame(resultado))
                 _botao_baixar_relatorio_html(extra, key="baixar_relatorio_dash")
                 if extra.get("tool") == "consultar_localizacoes_canteiro" and {
                     "latitude", "longitude"
@@ -3097,7 +3187,7 @@ def pagina_chat(supabase):
                 elif _item["tool"] == "consultar_urgencias" and isinstance(_resultado_item, dict):
                     _renderizar_urgencias_dash(_resultado_item)
                 elif isinstance(_resultado_item, list) and _resultado_item:
-                    st.dataframe(pd.DataFrame(_resultado_item), use_container_width=True, hide_index=True, placeholder="")
+                    _renderizar_tabela_resultado_viajai(_item["tool"], pd.DataFrame(_resultado_item))
                 else:
                     st.write(_resultado_item if _resultado_item else "(sem dado)")
             _botao_baixar_relatorio_analise_html(analise, key="baixar_analise_ia")
