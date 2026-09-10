@@ -144,7 +144,7 @@ MODEL_ID = "claude-sonnet-5"
 # sozinho a cada bump, sem precisar lembrar de editar as 2 linhas. Quando
 # o Rafael decidir acompanhar a versao real (pos-lancamento), e' so trocar
 # essa linha pra VERSAO_EXIBIDA = VERSAO_APP.
-VERSAO_APP = "v22.3"
+VERSAO_APP = "v23.0"
 VERSAO_EXIBIDA = f"v1.{VERSAO_APP.lstrip('v')} (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -462,7 +462,8 @@ def _input_cidade_com_sugestao(coluna, label, key, cidades_existentes, valor_atu
 
 TITULOS_RELATORIO_VIAJAI = {
     "consultar_previsao_folgas": "Previsão de folgas",
-    "consultar_pendencias_import": "Pendências de import",
+    "consultar_folgas_aguardando_vinculo": "Folgas aguardando vínculo com RH",
+    "consultar_pendencias_import": "Pendências de import (legado)",
     "consultar_historico_folga": "Histórico de folgas",
     "consultar_desvio_planejamento": "Desvio de planejamento",
     "consultar_previsao_gasto_colaborador": "Previsão de gasto por colaborador",
@@ -506,6 +507,7 @@ def _renderizar_urgencias_dash(resultado):
     (mostra JSON cru) - achado pelo Rafael 08/09 ('parece erro de
     principiante'). 3 sub-tabelas rotuladas, cada uma com contagem."""
     for _titulo, _chave in (
+        ("⏳ Folgas sem vínculo com RH (+60 dias)", "folgas_sem_vinculo_rh"),
         ("🚨 Folgas sem passagem", "folgas_sem_passagem"),
         ("💸 Preços fora do padrão", "precos_fora_padrao"),
         ("↩️ Passagens pra revisar", "passagens_para_revisar"),
@@ -578,6 +580,7 @@ def _corpo_item_relatorio_viajai(tool, resultado):
     if tool == "consultar_urgencias" and isinstance(resultado, dict):
         _blocos = []
         for _titulo, _chave in (
+            ("Folgas sem vínculo com RH (+60 dias)", "folgas_sem_vinculo_rh"),
             ("Folgas sem passagem", "folgas_sem_passagem"),
             ("Preços fora do padrão", "precos_fora_padrao"),
             ("Passagens pra revisar", "passagens_para_revisar"),
@@ -888,7 +891,13 @@ def _importar_um_arquivo(supabase, arquivo):
         resultados.append({"nome": l["nome"], **linha_resultado})
 
     criadas = sum(1 for r in resultados if r.get("resultado") == "criada")
-    pendentes = sum(1 for r in resultados if r.get("resultado") == "pendencia")
+    # NOVO schema_v0.40 (Caminho A): linha sem match 1:1 no RH nao vira mais
+    # pendencia_import - vira folga provisoria na hora (colaborador_id NULL,
+    # nome_provisorio preenchido). "pendentes" aqui conta esse resultado novo
+    # ('criada_provisoria') soh pra manter o total do lote coerente com o
+    # nome do parametro da RPC de fechamento (p_total_pendencias) - nao
+    # significa que foi criada pendencia_import nenhuma.
+    pendentes = sum(1 for r in resultados if r.get("resultado") == "criada_provisoria")
     supabase.rpc("viajai_finalizar_import_batch", {
         "p_batch_id": batch_id,
         "p_total_criadas": criadas,
@@ -900,16 +909,46 @@ def _importar_um_arquivo(supabase, arquivo):
 
 def pagina_importar_re090(supabase):
     st.subheader("Importar RE090")
+    # ATUALIZADO 10/09 (schema_v0.40, pedido do Rafael: "a amanda conseguir
+    # setar e trabalhar todos os colaboradores... posteriormente a RH subir
+    # e o match der ok, reune as informacoes") - sem match unico, a folga
+    # e' criada MESMO ASSIM (nao trava mais Amanda esperando o RH), soh fica
+    # marcada com o selo "aguardando vinculo com RH" ate alguem vincular
+    # (manual, aqui/em Confirmar folgas) ou o sistema achar sozinho
+    # ("Tentar vincular automaticamente" abaixo). Ninguem fica esquecido:
+    # passado +60 dias sem vincular, aparece um alerta em Urgencias.
     st.caption(
         "Sobe a(s) planilha(s), resolve cada colaborador contra o RH (ao vivo) "
-        "e grava a folga já com o canteiro espelho. Sem match único, a linha "
-        "vira pendência — nada é perdido, só fica pra você revisar. Pode subir "
-        "mais de um arquivo de uma vez — cada arquivo vira 1 lote no histórico, "
-        "revertível separadamente."
+        "e grava a folga já com o canteiro espelho. Sem match único, a folga "
+        "entra do mesmo jeito, com o selo ⏳ 'aguardando vínculo com RH' — "
+        "nada trava. Quando o RH cadastrar/ativar a pessoa (ou você vincular "
+        "na mão), o dado já lançado (custo, trecho, status) fica "
+        "automaticamente com ela, sem precisar reunir nada depois. Pode "
+        "subir mais de um arquivo de uma vez — cada arquivo vira 1 lote no "
+        "histórico, revertível separadamente."
     )
 
+    # CORRIGIDO 10/09 (achado pelo Rafael testando: reimportava o mesmo
+    # arquivo sozinho a cada clique em "Importar", e o preview às vezes
+    # mostrava gente que já tinha sido apagada da planilha original) -
+    # CAUSA RAIZ: st.file_uploader com key fixa nunca esvazia sozinho -
+    # ele guarda os bytes exatos de quando o arquivo foi solto na tela, e
+    # devolve os MESMOS arquivos (com os MESMOS bytes antigos, mesmo que o
+    # arquivo já tenha sido editado/salvo de novo no disco) em toda
+    # rerun/clique seguinte, até alguém clicar no "x" de cada arquivo na
+    # tela. Resultado: "Importar" de novo sem tirar o arquivo da lista
+    # reimporta o mesmo lote (e, se a planilha em disco mudou depois do
+    # primeiro upload, reimporta a versão VELHA, congelada no navegador -
+    # não busca o arquivo atual). Fix: key dinâmica que muda a cada
+    # import bem-sucedido, forçando o widget a esvaziar sozinho - assim
+    # cada arquivo só é processado 1 vez, e pra importar nesse mesmo nome
+    # de novo precisa soltar ele de novo (bytes atuais, garantido).
+    if "import_uploader_geracao" not in st.session_state:
+        st.session_state["import_uploader_geracao"] = 0
+
     arquivos = st.file_uploader(
-        "Planilha(s) RE090 (.xlsx)", type=["xlsx"], accept_multiple_files=True
+        "Planilha(s) RE090 (.xlsx)", type=["xlsx"], accept_multiple_files=True,
+        key=f"import_uploader_{st.session_state['import_uploader_geracao']}",
     )
     if arquivos:
         pre_leituras = []
@@ -931,13 +970,24 @@ def pagina_importar_re090(supabase):
                 nome, resultados, _ = _importar_um_arquivo(supabase, arquivo)
                 resultado_por_arquivo[nome] = resultados
             st.session_state["resultado_import"] = resultado_por_arquivo
+            # esvazia o uploader (ver comentário acima) - sem isso o próximo
+            # clique em "Importar" reprocessaria os mesmos arquivos nesta lista.
+            st.session_state["import_uploader_geracao"] += 1
+            st.rerun()
 
     if "resultado_import" in st.session_state:
         for nome_arquivo, resultados in st.session_state["resultado_import"].items():
             criadas = sum(1 for r in resultados if r.get("resultado") == "criada")
-            pendentes = sum(1 for r in resultados if r.get("resultado") == "pendencia")
+            # ATUALIZADO schema_v0.40: sem match 1:1 no RH nao vira mais
+            # pendencia_import - vira folga provisoria na hora ("aguardando
+            # vinculo com RH"). O dedup (reimportou a mesma pessoa/data por
+            # engano) tambem se aplica a esse caso agora - mesmo resultado
+            # 'duplicada' de sempre, so' que comparando nome_provisorio.
+            provisorias = sum(1 for r in resultados if r.get("resultado") == "criada_provisoria")
             duplicadas = sum(1 for r in resultados if r.get("resultado") == "duplicada")
-            msg = f"**{nome_arquivo}**: {criadas} folga(s) criada(s), {pendentes} em pendência"
+            msg = f"**{nome_arquivo}**: {criadas} folga(s) criada(s)"
+            if provisorias:
+                msg += f", {provisorias} criada(s) aguardando vínculo com RH (⏳ nome não bateu 1:1 agora — nada travado, vincula manual ou automático depois)"
             if duplicadas:
                 msg += f", {duplicadas} duplicada(s) (já existia folga prevista pra essa pessoa nessa mesma data — ignorada, não criou de novo)"
             st.success(msg + ".")
@@ -946,8 +996,13 @@ def pagina_importar_re090(supabase):
                 st.info(
                     "➡️ Próximo passo: as folgas criadas já aparecem em **Previsão de folgas** "
                     "(quando cada uma vai chegar) e, mais perto da data, em **Confirmar folgas** "
-                    "(pra registrar saída/retorno real). Se houve pendência, use o botão "
-                    "'🔄 Reprocessar pendências' embaixo assim que o RH cadastrar a pessoa."
+                    "(pra registrar saída/retorno real)."
+                )
+            if provisorias:
+                st.info(
+                    "🔗 Tem folga aguardando vínculo com RH nesse lote — use "
+                    "'Tentar vincular automaticamente' embaixo (tenta casar sozinho contra "
+                    "o RH atual) ou vá em **Confirmar folgas** pra vincular manualmente."
                 )
 
     st.divider()
@@ -965,7 +1020,7 @@ def pagina_importar_re090(supabase):
             cols[0].write(f"{lote['nome_arquivo']}")
             cols[1].write(lote["criado_em"][:16].replace("T", " "))
             cols[2].write(f"{lote['total_criadas']} criada(s)")
-            cols[3].write(f"{lote['total_pendencias']} pendência(s)")
+            cols[3].write(f"{lote['total_pendencias']} aguardando vínculo")
             if lote["revertido"]:
                 cols[4].write("↩️ revertido")
             else:
@@ -995,12 +1050,179 @@ def pagina_importar_re090(supabase):
         st.caption("Nenhum import feito ainda.")
 
     st.divider()
-    st.subheader("Pendências abertas")
+    # NOVO schema_v0.40 (Caminho A - confirmado pelo Rafael 10/09: "1. sim
+    # caminho A"): substitui o antigo fluxo de pendencia_import pra RE090.
+    # Sem match 1:1, a folga ja e' criada com colaborador_id NULL - essa
+    # secao concentra as 3 acoes possiveis sobre ela: vincular na mao,
+    # tentar vincular sozinho (todas de uma vez), ou so' revisar/deixar pro
+    # alerta de +60 dias em Urgencias.
+    st.subheader("⏳ Folgas aguardando vínculo com RH")
+    st.caption(
+        "Folga criada (via import ou manual) sem achar 1:1 no RH no momento — "
+        "não trava nada, a Amanda já pode lançar custo/trecho/status normalmente "
+        "usando o nome provisório. Some dessa lista sozinha assim que vincular "
+        "(manual abaixo, ou automático). Sem vincular há mais de 60 dias, "
+        "aparece um alerta separado em **Urgências**."
+    )
+    try:
+        # Junta viajai_listar_folgas_previstas (prevista/confirmada/em_andamento)
+        # + viajai_listar_folgas_desvio (status <> 'prevista', cobre tambem
+        # realizada/vendida/cancelada) - mesmo padrao de "Confirmar folgas"
+        # (mostrar_fechadas) - senao uma folga provisoria que ja foi marcada
+        # vendida/cancelada/realizada sem nunca ter sido vinculada ficaria
+        # visivel so' no alerta de +60 dias, sem nenhuma tela pra resolver.
+        _provisorias_resp = supabase.rpc(
+            "viajai_listar_folgas_previstas", {"p_limite": 1000}
+        ).execute()
+        _folgas_provisorias = [
+            f for f in (_provisorias_resp.data or []) if f.get("aguardando_vinculo_rh")
+        ]
+        _ids_prov_ja_presentes = {int(f["folga_id"]) for f in _folgas_provisorias}
+        _fechadas_prov_resp = supabase.rpc(
+            "viajai_listar_folgas_desvio", {"p_limite": 1000}
+        ).execute()
+        for _f in (_fechadas_prov_resp.data or []):
+            if _f.get("aguardando_vinculo_rh") and int(_f["folga_id"]) not in _ids_prov_ja_presentes:
+                _folgas_provisorias.append({
+                    "folga_id": _f["folga_id"], "nome": _f["nome"], "obra_nome": _f.get("obra_nome"),
+                    "status": _f["status"], "data_saida_prevista": _f.get("data_saida_prevista"),
+                })
+    except Exception as e:
+        _folgas_provisorias = []
+        st.error(f"Não consegui consultar (rodou o schema_v0.40 no Supabase?) — {e}")
+
+    c_auto, c_info = st.columns([1, 3])
+    if c_auto.button("🔄 Tentar vincular automaticamente"):
+        r_auto = supabase.rpc("viajai_tentar_vincular_automatico", {}).execute()
+        resumo_auto = r_auto.data[0] if r_auto.data else {}
+        vinculadas_auto = resumo_auto.get("vinculadas", 0)
+        ainda_auto = resumo_auto.get("ainda_sem_vinculo", 0)
+        if vinculadas_auto:
+            _flash("success", f"{vinculadas_auto} folga(s) vinculada(s) agora. {ainda_auto} continuam sem vínculo (sem match único no RH atual).")
+        else:
+            _flash("info", f"Nenhuma vinculou ainda ({ainda_auto} continuam sem match único no RH).")
+        st.rerun()
+    c_info.caption(
+        "Tenta casar cada nome provisório contra o RH ATUAL — útil quando o RH "
+        "cadastrou/ativou a pessoa depois do import. Só vincula quando dá match "
+        "único (mesma regra do import); ambíguo (2+ pessoas com nome parecido) "
+        "fica pra vínculo manual abaixo."
+    )
+
+    if not _folgas_provisorias:
+        st.caption("Nenhuma folga aguardando vínculo com RH no momento.")
+    else:
+        df_prov = pd.DataFrame(_folgas_provisorias)
+        st.dataframe(
+            df_prov[["folga_id", "nome", "obra_nome", "status", "data_saida_prevista"]],
+            column_config={
+                "folga_id": st.column_config.NumberColumn("Nº", format="%d"),
+                "nome": "Nome (provisório)",
+                "obra_nome": "Obra/canteiro (texto da planilha ou manual)",
+                "status": "Status",
+                "data_saida_prevista": st.column_config.DateColumn("Saída prevista"),
+            },
+            hide_index=True, use_container_width=True, placeholder="",
+        )
+        st.write("**🔗 Vincular ao RH manualmente**")
+        try:
+            _ativos_resp = supabase.rpc("viajai_colaboradores_ativos").execute()
+            _ativos_data = _ativos_resp.data or []
+        except Exception as e:
+            _ativos_data = []
+            st.error(f"Não consegui consultar colaboradores ativos — {e}")
+        if not _ativos_data:
+            st.caption("Nenhum colaborador ativo encontrado no RH pra vincular.")
+        else:
+            _opcoes_folga_prov = {
+                f"#{f['folga_id']} — {f['nome']} — {f.get('status') or '—'} — "
+                f"saída {f.get('data_saida_prevista') or '—'}": f["folga_id"]
+                for f in _folgas_provisorias
+            }
+            _opcoes_colab = {
+                f"{c['nome']} — {c.get('obra_nome') or '—'} ({c['colaborador_id']})": c["colaborador_id"]
+                for c in _ativos_data
+            }
+            with st.form("form_vincular_folga_rh"):
+                folga_prov_sel = st.selectbox("Folga aguardando vínculo", list(_opcoes_folga_prov.keys()), key="vinc_rh_folga")
+                colab_sel = st.selectbox("Colaborador (RH)", list(_opcoes_colab.keys()), key="vinc_rh_colab")
+                enviar_vinc_rh = st.form_submit_button("Vincular")
+            if enviar_vinc_rh:
+                try:
+                    supabase.rpc("viajai_vincular_colaborador_folga", {
+                        "p_folga_id": _opcoes_folga_prov[folga_prov_sel],
+                        "p_colaborador_id": _opcoes_colab[colab_sel],
+                    }).execute()
+                    _flash("success", "Folga vinculada ao colaborador do RH.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao vincular: {e}")
+
+    st.divider()
+    with st.expander("➕ Adicionar folga manualmente (sem planilha)"):
+        st.caption(
+            "Pra demanda emergencial (ex.: comprar passagem urgente) sem esperar "
+            "o próximo RE090 — pedido do Rafael 10/09. Resolve contra o RH na "
+            "hora igual ao import; sem match, cria como 'aguardando vínculo com "
+            "RH' (aparece na lista acima) do mesmo jeito."
+        )
+        with st.form("form_criar_folga_manual"):
+            nome_manual = st.text_input("Nome do colaborador", key="manual_nome")
+            matricula_manual = st.text_input("Matrícula (opcional, ajuda a desambiguar nome repetido)", key="manual_matricula")
+            obra_texto_manual = st.text_input("Obra/canteiro (texto livre, opcional)", key="manual_obra_texto")
+            c_m1, c_m2, c_m3 = st.columns(3)
+            data_saida_manual = c_m1.date_input("Saída prevista", value=None, key="manual_data_saida")
+            data_retorno_manual = c_m2.date_input("Retorno previsto", value=None, key="manual_data_retorno")
+            data_ultimo_retorno_manual = c_m3.date_input("Último retorno (base do ciclo, opcional)", value=None, key="manual_data_ultimo_retorno")
+            enviar_manual = st.form_submit_button("Criar folga", type="primary")
+        if enviar_manual:
+            if not nome_manual or not nome_manual.strip():
+                st.error("Nome é obrigatório.")
+            else:
+                try:
+                    r_manual = supabase.rpc("viajai_criar_folga_manual", {
+                        "p_nome": nome_manual.strip(),
+                        "p_matricula": matricula_manual.strip() or None,
+                        "p_texto_obra_canteiro": obra_texto_manual.strip() or None,
+                        "p_data_saida_prevista": data_saida_manual.isoformat() if data_saida_manual else None,
+                        "p_data_retorno_prevista": data_retorno_manual.isoformat() if data_retorno_manual else None,
+                        "p_data_ultimo_retorno": data_ultimo_retorno_manual.isoformat() if data_ultimo_retorno_manual else None,
+                    }).execute()
+                    r_manual_linha = r_manual.data[0] if r_manual.data else {}
+                    if r_manual_linha.get("resultado") == "criada":
+                        _flash("success", f"Folga criada e já vinculada a {nome_manual.strip()} (achou 1:1 no RH).")
+                    else:
+                        _flash("success", f"Folga criada aguardando vínculo com RH ({nome_manual.strip()}) — sem match único agora, aparece na lista acima.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao criar folga manual: {e}")
+
+    st.divider()
+    pend = supabase.rpc("viajai_listar_pendencias_import", {"p_apenas_nao_resolvidas": True}).execute()
+    # NOVO 10/09 (pedido do Rafael): contador ao lado do título, pra ver de
+    # relance se a fila tá crescendo ou diminuindo sem precisar contar linha.
+    st.subheader(f"Pendências abertas — legado ({len(pend.data or [])})")
+    st.caption(
+        "⚠️ Desde o schema_v0.40, o import RE090 não gera mais pendência nova "
+        "aqui — nome sem match vira folga 'aguardando vínculo com RH' (seção "
+        "acima). Esta lista só mostra pendência criada ANTES dessa mudança "
+        "(deve ficar vazia depois da limpeza de base de teste). Mantida só "
+        "pra não perder o que já estava registrado."
+    )
     st.caption(
         "Marca 'Resolvida' pra tirar da lista (revisou manualmente e não "
-        "precisa mais aparecer aqui — não cria folga nenhuma, só limpa a fila)."
+        "precisa mais aparecer aqui — não cria folga nenhuma, só limpa a fila; "
+        "a pendência continua salva no banco, só sai da lista de abertas). "
+        "⚠️ ATENÇÃO (dúvida do Rafael 10/09, confirmada no código): marcar "
+        "resolvida é **definitivo pro 'Reprocessar pendências'** — essa "
+        "pendência nunca mais entra na tentativa automática de casar com o "
+        "RH, nem se a pessoa for cadastrada/ativada lá depois. Só marque se "
+        "já resolveu esse caso por fora (ex.: criou a folga manualmente, ou "
+        "confirmou que a pessoa não vai mais trabalhar aqui). Se ainda pode "
+        "ser só questão de tempo do RH cadastrar, deixe sem marcar — "
+        "'Reprocessar pendências' vai pegar sozinho quando der match. Marcou "
+        "sem querer? Dá pra reabrir no expander embaixo."
     )
-    pend = supabase.rpc("viajai_listar_pendencias_import", {"p_apenas_nao_resolvidas": True}).execute()
     if pend.data:
         df_pend = pd.DataFrame(pend.data)
         df_pend = df_pend.drop(columns=[c for c in ["origem"] if c in df_pend.columns])
@@ -1009,7 +1231,11 @@ def pagina_importar_re090(supabase):
             df_pend,
             column_config={
                 "resolvido": st.column_config.CheckboxColumn(
-                    "✏️ Resolvida", help="Marca e clica em Salvar embaixo pra tirar da lista."
+                    "✏️ Resolvida",
+                    help=(
+                        "Definitivo pro reprocessamento automático (ver aviso "
+                        "acima) — marca e clica em Salvar embaixo."
+                    ),
                 ),
             },
             disabled=[c for c in df_pend.columns if c not in ("resolvido",)],
@@ -1019,12 +1245,13 @@ def pagina_importar_re090(supabase):
         )
         _botao_exportar_excel(df_pend.drop(columns=["resolvido"]), "viajai_pendencias.xlsx")
         if st.button(
-            "🔄 Reprocessar pendências",
+            "🔄 Reprocessar pendências (legado)",
             help=(
-                "Tenta casar de novo cada pendência contra o cadastro ATUAL "
-                "do RH — sem precisar reupload do arquivo. Útil quando o RH "
-                "ainda estava subindo/incompleto na hora do import original "
-                "e já cadastrou/ativou a pessoa depois."
+                "Só afeta pendência antiga (de antes do schema_v0.40) — pra "
+                "folga 'aguardando vínculo com RH' (fluxo atual), use "
+                "'Tentar vincular automaticamente' na seção acima. Tenta casar "
+                "de novo cada pendência contra o cadastro ATUAL do RH — sem "
+                "precisar reupload do arquivo."
             ),
         ):
             r_reproc = supabase.rpc("viajai_reprocessar_pendencias_import", {}).execute()
@@ -1062,6 +1289,41 @@ def pagina_importar_re090(supabase):
     else:
         st.caption("Nenhuma pendência em aberto.")
 
+    # NOVO 10/09 (dúvida do Rafael: "pra onde vai" quando marca resolvida) -
+    # a linha nunca é apagada, só some da lista acima (resolvido=true) - RPC
+    # já suportava listar as resolvidas também (schema_v0.4, parâmetro
+    # p_apenas_nao_resolvidas), só a tela nunca tinha chamado com False.
+    with st.expander("Ver pendências já marcadas como resolvidas"):
+        pend_todas = supabase.rpc("viajai_listar_pendencias_import", {"p_apenas_nao_resolvidas": False}).execute()
+        df_pend_resolvidas = pd.DataFrame(pend_todas.data or [])
+        if not df_pend_resolvidas.empty:
+            df_pend_resolvidas = df_pend_resolvidas[df_pend_resolvidas["resolvido"] == True]  # noqa: E712
+        if df_pend_resolvidas.empty:
+            st.caption("Nenhuma pendência resolvida ainda.")
+        else:
+            st.caption(
+                "Marcou sem querer, ou o caso na verdade ainda pode casar com "
+                "o RH mais tarde? Reabre aqui — ela volta pra lista de abertas "
+                "e volta a entrar em 'Reprocessar pendências'."
+            )
+            st.dataframe(
+                df_pend_resolvidas.drop(columns=[c for c in ["origem"] if c in df_pend_resolvidas.columns]),
+                hide_index=True, use_container_width=True, placeholder="",
+            )
+            _reabrir_rotulo = df_pend_resolvidas.apply(
+                lambda r: f"#{r['id']} — {r.get('nome_planilha') or '—'} — {r.get('motivo') or '—'}",
+                axis=1,
+            )
+            _escolha_reabrir = st.selectbox("Qual reabrir?", _reabrir_rotulo, key="pend_reabrir_select")
+            _id_reabrir = int(df_pend_resolvidas.loc[_reabrir_rotulo == _escolha_reabrir, "id"].iloc[0])
+            if st.button("↩️ Reabrir esta pendência", key="pend_reabrir_btn"):
+                supabase.rpc("viajai_marcar_pendencia_resolvida", {
+                    "p_pendencia_id": _id_reabrir,
+                    "p_resolvido": False,
+                }).execute()
+                _flash("success", "Pendência reaberta — volta a aparecer em 'Pendências abertas'.")
+                st.rerun()
+
 
 _STATUS_OPCOES = ["prevista", "confirmada", "em_andamento", "realizada", "vendida", "cancelada"]
 
@@ -1095,6 +1357,17 @@ def pagina_confirmar_folgas(supabase):
         "Por padrão só aparece quem ainda está em aberto. Marque a caixa abaixo "
         "pra também poder corrigir uma folga que já saiu daqui (realizada, "
         "vendida ou cancelada) — o salvar funciona igual."
+    )
+    # NOVO schema_v0.40: folga sem match 1:1 no RH aparece aqui do mesmo
+    # jeito, com "⏳ aguardando vínculo com RH" na Situação — nao trava,
+    # da' pra editar Status/datas normalmente com o nome provisorio. Vincular
+    # ao RH (manual ou automatico) fica centralizado em "Importar RE090" pra
+    # nao duplicar a mesma acao de escrita em 2 telas.
+    st.caption(
+        "⏳ Viu 'aguardando vínculo com RH' na Situação? É folga com nome "
+        "provisório (import ou lançamento manual) que ainda não achou 1:1 no "
+        "RH — pode editar normalmente aqui, o vínculo (manual ou automático) "
+        "fica na página **Importar RE090**."
     )
 
     # v21.3 (pedido do Rafael 09/09: "se eu quiser atualizar uma folga
@@ -1134,6 +1407,7 @@ def pagina_confirmar_folgas(supabase):
             _colunas_comuns = [
                 "folga_id", "colaborador_id", "nome", "obra_nome", "canteiro_nome",
                 "status", "data_saida_prevista", "data_retorno_prevista",
+                "aguardando_vinculo_rh",
             ]
             for l in fechadas_resp.data:
                 if l["status"] not in _STATUS_ABERTOS and int(l["folga_id"]) not in _ids_ja_presentes:
@@ -1152,11 +1426,18 @@ def pagina_confirmar_folgas(supabase):
         _hoje = date.today()
         base["data_saida_prevista"] = pd.to_datetime(base["data_saida_prevista"]).dt.date
 
+        # NOVO schema_v0.40: folga provisoria (colaborador_id NULL, aguardando
+        # RH cadastrar/vincular) ganha um selo somado a situacao normal - nao
+        # substitui "atrasada"/"concluida", so' avisa que falta o vinculo.
         def _situacao(row):
             if row["status"] not in _STATUS_ABERTOS:
-                return "🔒 concluída/fechada"
-            d = row["data_saida_prevista"]
-            return "⚠️ atrasada" if pd.notna(d) and d < _hoje else "no prazo"
+                situacao_base = "🔒 concluída/fechada"
+            else:
+                d = row["data_saida_prevista"]
+                situacao_base = "⚠️ atrasada" if pd.notna(d) and d < _hoje else "no prazo"
+            if row.get("aguardando_vinculo_rh"):
+                return f"⏳ aguardando vínculo com RH + {situacao_base}"
+            return situacao_base
 
         base["situacao"] = base.apply(_situacao, axis=1)
 
@@ -1336,6 +1617,23 @@ def pagina_previsao(supabase):
 
     df = pd.DataFrame(resp.data)
 
+    # NOVO schema_v0.40: viajai_previsao_folgas() parte de
+    # viajai_colaboradores_ativos() (RH), entao uma folga provisoria
+    # (colaborador_id NULL, ainda sem match) nao tem como aparecer aqui por
+    # natureza - essa tela e' centrada em quem JA esta identificado no RH.
+    # Avisa quantas existem e onde ver/agir, pra nao parecer que sumiram.
+    _folgas_abertas_panorama = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 1000}).execute()
+    _qtd_aguardando_vinculo = sum(
+        1 for f in (_folgas_abertas_panorama.data or []) if f.get("aguardando_vinculo_rh")
+    )
+    if _qtd_aguardando_vinculo:
+        st.info(
+            f"⏳ {_qtd_aguardando_vinculo} folga(s) aguardando vínculo com RH não "
+            "aparecem nesta tela (ela é centrada em quem já está identificado no "
+            "RH) — veja em **Confirmar folgas** ou **Urgências**, e vincule em "
+            "**Importar RE090**."
+        )
+
     # previsao de gasto por colaborador (schema_v0.15): media do proprio
     # historico, cai pra media do canteiro, depois da obra, se nao tiver -
     # pedido do Rafael (02/09) pra dar valor em R$ nessa tabela tambem.
@@ -1366,7 +1664,9 @@ def pagina_previsao(supabase):
     # (status de quem esta com folga aberta agora).
     st.subheader("📊 Panorama geral — todos os colaboradores ativos")
 
-    _folgas_abertas_panorama = supabase.rpc("viajai_listar_folgas_previstas", {"p_limite": 1000}).execute()
+    # _folgas_abertas_panorama ja foi buscado acima (schema_v0.40, pra
+    # contar quem esta aguardando vinculo com RH) - reaproveita, nao busca
+    # de novo.
     _status_por_colab = {}
     if _folgas_abertas_panorama.data:
         for _f in _folgas_abertas_panorama.data:
@@ -1715,8 +2015,23 @@ def pagina_custo_passagens(supabase):
             )
         else:
             df_folgas = pd.DataFrame(folgas_resp.data)
+            # NOVO 10/09 (pedido do Rafael: lista cresce e "nome - obra -
+            # status" sozinho não basta pra achar a folga certa rolando a
+            # lista) - rótulo ganha a data de saída prevista, e a lista
+            # ordena pela mesma data (mais recente primeiro) em vez da
+            # ordem crua que a RPC devolveu.
+            df_folgas = df_folgas.sort_values("data_saida_prevista", ascending=False, na_position="last")
+            # NOVO schema_v0.40: folga provisoria (aguardando_vinculo_rh)
+            # ganha o selo ⏳ no rotulo tambem, pra Amanda saber que aquele
+            # nome ainda nao foi vinculado ao RH (mas ja pode lancar custo
+            # normalmente - o vinculo posterior nao muda o folga_id).
             df_folgas["rotulo"] = df_folgas.apply(
-                lambda r: f"#{r['folga_id']} — {r['nome']} — {r.get('canteiro_nome') or '—'} — {r['status']}",
+                lambda r: (
+                    f"#{r['folga_id']} — "
+                    f"{'⏳ ' if r.get('aguardando_vinculo_rh') else ''}{r['nome']} — "
+                    f"{r.get('canteiro_nome') or '—'} — "
+                    f"{r['status']} — saída {r['data_saida_prevista'] or '—'}"
+                ),
                 axis=1,
             )
             escolha = st.selectbox("Folga", df_folgas["rotulo"], key="folga_custo_select")
@@ -2133,11 +2448,21 @@ TOOLS_VIAJAI = [
     },
     {
         "name": "consultar_pendencias_import",
-        "description": "Linhas de import RE090 que nao bateram com nenhum colaborador do RH (pendencia de revisao manual).",
+        "description": "LEGADO (schema_v0.40): pendencia de import criada ANTES do schema_v0.40 - hoje o import RE090 nao gera mais pendencia nova (linha sem match 1:1 vira folga 'aguardando vinculo com RH' - use consultar_folgas_aguardando_vinculo pra isso). So' use esta ferramenta se o usuario perguntar especificamente por 'pendencia antiga/legado'.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "apenas_nao_resolvidas": {"type": "boolean", "description": "So' as ainda nao marcadas como resolvidas (padrao true)"}
+            },
+        },
+    },
+    {
+        "name": "consultar_folgas_aguardando_vinculo",
+        "description": "Folgas criadas (import RE090 ou manual) que ainda nao acharam match 1:1 no RH - colaborador_id em aberto, nome/obra provisorios (schema_v0.40). Nao trava nada, mas precisa vincular em algum momento (manual em 'Importar RE090' ou automatico). Use para 'quem esta sem vinculo com o RH', 'folga provisoria', 'nome que nao bateu no import'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dias_minimo": {"type": "integer", "description": "So' quem esta ha pelo menos X dias sem vinculo (padrao 0 = todas, sem filtro de tempo)"}
             },
         },
     },
@@ -2396,11 +2721,11 @@ TOOLS_VIAJAI = [
     {
         "name": "consultar_urgencias",
         "description": (
-            "Resumo das urgencias atuais do Viaj.AI: (1) folgas chegando nos "
-            "proximos dias SEM passagem lancada ainda, (2) lancamentos recentes "
-            "com preco fora do padrao historico da rota, (3) passagem ja "
-            "comprada vinculada a uma folga que depois virou vendida/cancelada "
-            "(candidata a revisar estorno). Use quando o usuario perguntar 'tem "
+            "Resumo das urgencias atuais do Viaj.AI: (1) folga sem vinculo com RH ha mais de "
+            "60 dias (schema_v0.40), (2) folgas chegando nos proximos dias SEM passagem "
+            "lancada ainda, (3) lancamentos recentes com preco fora do padrao historico da "
+            "rota, (4) passagem ja comprada vinculada a uma folga que depois virou vendida/"
+            "cancelada (candidata a revisar estorno). Use quando o usuario perguntar 'tem "
             "alguma urgencia', 'o que precisa de atencao hoje', 'tem algo "
             "pendente' etc. Mesma logica da aba 'Urgencias' do app."
         ),
@@ -2436,6 +2761,10 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
         elif nome == "consultar_pendencias_import":
             r = supabase.rpc("viajai_listar_pendencias_import", {
                 "p_apenas_nao_resolvidas": entrada.get("apenas_nao_resolvidas", True),
+            }).execute()
+        elif nome == "consultar_folgas_aguardando_vinculo":
+            r = supabase.rpc("viajai_folgas_sem_vinculo_rh", {
+                "p_dias": entrada.get("dias_minimo", 0),
             }).execute()
         elif nome == "consultar_historico_folga":
             r = supabase.rpc("viajai_listar_historico_folga", {"p_limite": entrada.get("limite", 200)}).execute()
@@ -2606,12 +2935,14 @@ def _executar_ferramenta_viajai(supabase, nome, entrada):
                 "resumo": f"{int(dias)} dia(s) x valor fixo ({tipo}) = R$ {float(valor_total):.2f} (formula simples, sem pernoite ainda)",
             }
         elif nome == "consultar_urgencias":
+            r_sem_vinculo = supabase.rpc("viajai_folgas_sem_vinculo_rh", {"p_dias": 60}).execute()
             r_sem_passagem = supabase.rpc("viajai_folgas_sem_passagem", {"p_dias_janela": 10}).execute()
             r_preco = supabase.rpc(
                 "viajai_alerta_preco_fora_padrao", {"p_dias_janela": 30, "p_desvio_pct": 0.4}
             ).execute()
             r_revisar = supabase.rpc("viajai_folga_passagem_para_revisar").execute()
             return {
+                "folgas_sem_vinculo_rh": r_sem_vinculo.data or [],
                 "folgas_sem_passagem": r_sem_passagem.data or [],
                 "precos_fora_padrao": r_preco.data or [],
                 "passagens_para_revisar": r_revisar.data or [],
@@ -2689,17 +3020,20 @@ def _montar_system_prompt_viajai(usuario_email):
         "vendida, cancelada) via propor_atualizar_folga - MESMA regra: nunca grava sozinho, so' "
         "propoe pro usuario confirmar no painel. Fora essas 2 propostas, voce ainda so' CONSULTA "
         "— outra acao (registrar trecho/gasto de uma folga especifica) nao tem ferramenta ainda, "
-        "oriente a usar a tela correspondente. 4 acoes existem SO na tela, sem ferramenta de "
-        "chat pra executar (voce pode explicar que existem e orientar onde estao, mas nao tem "
-        "como fazer por voce): 'reprocessar pendencias de import' (botao na tela 'Importar "
-        "RE090', tenta casar de novo contra o RH atual sem precisar reupload), 'atribuir "
-        "colaborador' a um lancamento rapido que ficou sem pessoa/so com nome provisorio "
-        "(expander na aba 'Lancamento rapido', dentro de 'Custo & Passagens'), 'marcar "
-        "passagem como revisada' (formulario na aba 'Urgencias', secao 'Passagem vinculada a "
-        "folga vendida/cancelada' - fica registrado pra sempre no historico dali) e 'marcar/"
-        "desfazer reembolso de um trecho' (expander na aba 'Por folga', dentro de 'Custo & "
-        "Passagens' - desconta do calculo de gasto real, sem mexer no preco original da "
-        "passagem).\n\n"
+        "oriente a usar a tela correspondente. Varias acoes existem SO na tela, sem ferramenta "
+        "de chat pra executar (voce pode explicar que existem e orientar onde estao, mas nao "
+        "tem como fazer por voce): 'vincular ao RH' uma folga aguardando vinculo, manual ou "
+        "'tentar vincular automaticamente' (secao 'Folgas aguardando vinculo com RH', dentro de "
+        "'Importar RE090'), 'adicionar folga manualmente' sem planilha, pra demanda emergencial "
+        "(expander na mesma tela 'Importar RE090'), 'reprocessar pendencias de import' - so' "
+        "afeta pendencia ANTIGA, de antes do schema_v0.40 (botao na mesma tela, tenta casar de "
+        "novo contra o RH atual sem precisar reupload), 'atribuir colaborador' a um lancamento "
+        "rapido que ficou sem pessoa/so com nome provisorio (expander na aba 'Lancamento "
+        "rapido', dentro de 'Custo & Passagens'), 'marcar passagem como revisada' (formulario "
+        "na aba 'Urgencias', secao 'Passagem vinculada a folga vendida/cancelada' - fica "
+        "registrado pra sempre no historico dali) e 'marcar/desfazer reembolso de um trecho' "
+        "(expander na aba 'Por folga', dentro de 'Custo & Passagens' - desconta do calculo de "
+        "gasto real, sem mexer no preco original da passagem).\n\n"
         "Se o usuario perguntar 'como funciona', 'o que voce consegue fazer', 'pra que serve "
         "essa tela/funcao' ou demonstrar duvida sobre o fluxo do Viaj.AI, EXPLIQUE em texto "
         "claro em vez de tentar chamar uma ferramenta - use como referencia o conteudo da aba "
@@ -2707,7 +3041,11 @@ def _montar_system_prompt_viajai(usuario_email):
         "nao pode fazer, frases-modelo, mensagens comuns que nao sao erro).\n\n"
         "Guia de qual ferramenta usar:\n"
         "- quem esta de folga / precisa viajar / urgencia -> consultar_previsao_folgas.\n"
-        "- pendencia de import / nao bateu no RH -> consultar_pendencias_import.\n"
+        "- folga sem match no RH / nome provisorio / aguardando vinculo -> "
+        "consultar_folgas_aguardando_vinculo (schema_v0.40 - e' o caso normal hoje pra quem nao "
+        "bateu no import).\n"
+        "- pendencia de import ANTIGA/legado (de antes do schema_v0.40) -> "
+        "consultar_pendencias_import (so' use se o usuario pedir especificamente por isso).\n"
         "- historico de mudanca de status de folga -> consultar_historico_folga.\n"
         "- quem atrasou / desvio do planejado -> consultar_desvio_planejamento.\n"
         "- previsao de gasto por colaborador -> consultar_previsao_gasto_colaborador "
@@ -3348,6 +3686,48 @@ def pagina_urgencias(supabase):
         "import associado (criada antes da rastreabilidade ou por outro caminho)."
     )
 
+    # NOVO schema_v0.40 (Caminho A, confirmado pelo Rafael 10/09: "2. sim
+    # vamos deixar por 60 dias por enquanto") - substitui o antigo botao
+    # "Resolvida" de pendencia por um alerta baseado em tempo: folga sem
+    # vinculo com RH nunca fica esquecida pra sempre, so' vira alerta aqui
+    # depois de N dias. Acao (vincular manual/automatico) fica centralizada
+    # em Importar RE090, pra nao duplicar a mesma escrita em 2 telas.
+    st.subheader("⏳ Folgas aguardando vínculo com RH há mais de 60 dias")
+    st.caption(
+        "Nome provisório (import ou lançamento manual) que passou de 60 dias "
+        "sem achar match único no RH — não travou nada até aqui, mas merece "
+        "revisar (RH ainda não cadastrou a pessoa? nome está errado? pessoa "
+        "não existe mesmo?). Vincular manual ou tentar automático fica na "
+        "página **Importar RE090**."
+    )
+    try:
+        r0 = supabase.rpc("viajai_folgas_sem_vinculo_rh", {"p_dias": 60}).execute()
+        if r0.data:
+            st.dataframe(
+                pd.DataFrame(r0.data),
+                column_order=[
+                    "folga_id", "nome_provisorio", "obra_texto_provisorio",
+                    "origem_criacao", "status", "data_saida_prevista", "dias_sem_vinculo",
+                ],
+                column_config={
+                    "folga_id": st.column_config.NumberColumn("🔒 Nº", format="%d"),
+                    "nome_provisorio": st.column_config.TextColumn("🔒 Nome (provisório)"),
+                    "obra_texto_provisorio": st.column_config.TextColumn("🔒 Obra/canteiro (texto)"),
+                    "origem_criacao": st.column_config.TextColumn(
+                        "🔒 Origem", help="re090 = veio de import de planilha; manual = lançada direto na tela.",
+                    ),
+                    "status": st.column_config.TextColumn("🔒 Status"),
+                    "data_saida_prevista": st.column_config.DateColumn("🔒 Saída prevista"),
+                    "dias_sem_vinculo": st.column_config.NumberColumn("🔒 Dias sem vínculo"),
+                },
+                use_container_width=True, hide_index=True, placeholder="",
+            )
+        else:
+            st.success("Nenhuma folga passou de 60 dias sem vínculo com RH.")
+    except Exception as e:
+        st.error(f"Não consegui consultar (rodou o schema_v0.40 no Supabase?) — {e}")
+
+    st.divider()
     st.subheader("🚨 Folgas chegando sem passagem lançada")
     st.caption(
         "O que fazer: lance a passagem em **Custo & Passagens** (aba "
@@ -3360,6 +3740,9 @@ def pagina_urgencias(supabase):
         if r1.data:
             df1 = pd.DataFrame(r1.data)
             df1["origem_import"] = df1.apply(_fmt_origem_urgencia, axis=1)
+            df1["nome"] = df1.apply(
+                lambda r: (f"⏳ {r['nome']}" if r.get("aguardando_vinculo_rh") else r["nome"]), axis=1,
+            )
             st.dataframe(
                 df1,
                 column_order=[
@@ -3443,6 +3826,9 @@ def pagina_urgencias(supabase):
         if r3.data:
             df_revisar = pd.DataFrame(r3.data)
             df_revisar["origem_import"] = df_revisar.apply(_fmt_origem_urgencia, axis=1)
+            df_revisar["nome"] = df_revisar.apply(
+                lambda r: (f"⏳ {r['nome']}" if r.get("aguardando_vinculo_rh") else r["nome"]), axis=1,
+            )
             st.dataframe(
                 df_revisar,
                 column_order=[
@@ -3641,12 +4027,12 @@ def pagina_ajuda():
     st.markdown(
         """
 ### Fluxo geral
-1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco. Sem match com o RH vira pendência (não trava nada); tem botão **"Reprocessar pendências"** pra tentar casar de novo mais tarde, sem reupload, quando o RH cadastrar a pessoa.
+1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco. Sem match 1:1 com o RH, a folga é criada mesmo assim (não trava nada), com o selo "⏳ aguardando vínculo com RH" e nome provisório — dá pra vincular na mesma tela (manual, escolhendo o colaborador certo) ou clicar **"Tentar vincular automaticamente"** quando o RH cadastrar/ativar a pessoa; passado 60 dias sem vincular, vira alerta em Urgências. Também dá pra **adicionar folga manualmente** (sem esperar planilha) na mesma página, pra demanda emergencial.
 2. **Confirmar folgas** — atualiza folga em aberto (status "prevista", "confirmada" ou "em_andamento") pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada" — inclusive folga que já tinha passagem comprada e depois foi vendida/cancelada.
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
 4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Aba "Por folga": adiciona trecho por trecho de uma mesma viagem (reenviar com o mesmo "Sentido" empilha na MESMA viagem, não cria outra) e dá pra marcar/desfazer reembolso de um trecho (some do gasto real, sem apagar o preço original). Aba "Lançamento rápido": dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome; também dá pra **vincular a uma folga específica** (opcional, tela e chat) — é o que faz essa passagem aparecer em "Passagem pra revisar" (Urgências) se a folga for vendida/cancelada depois.
 5. **Dashboard** — todas as métricas agregadas num só lugar: custo por mês, custo por obra, sazonalidade de folga, delay de envio do RE090, prazo de compra de passagem, e o desvio de planejamento (previsto x real, com e sem custo cruzado).
-6. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — cobre passagem lançada tanto em "Lançamento rápido" quanto em "Por folga", desde que vinculada à folga; dá pra marcar como revisada, fica guardado num histórico permanente; e dá pra vincular um lançamento antigo "solto" a uma folga retroativamente), e os últimos erros registrados pelo sistema.
+6. **Urgências** — alertas: folga aguardando vínculo com RH há mais de 60 dias, folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — cobre passagem lançada tanto em "Lançamento rápido" quanto em "Por folga", desde que vinculada à folga; dá pra marcar como revisada, fica guardado num histórico permanente; e dá pra vincular um lançamento antigo "solto" a uma folga retroativamente), e os últimos erros registrados pelo sistema.
 7. **Viaj.AI** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
 
 ### O que o Assistente pode / não pode fazer
