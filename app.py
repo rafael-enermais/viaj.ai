@@ -136,11 +136,16 @@ MODEL_ID = "claude-sonnet-5"
 # VERSAO_APP = controle INTERNO de build, usado no git/vault/versoes.md -
 # nao muda de significado. VERSAO_EXIBIDA = o que aparece pro usuario
 # final (Amanda etc) - pedido do Rafael 04/09: "ainda nao entreguei,
-# melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
-# depois disso o Rafael decide quando essa string passa a acompanhar
-# VERSAO_APP de novo.
-VERSAO_APP = "v22.2"
-VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
+# melhor deixar como a versao 1 do projeto" ate o lancamento de verdade.
+# CORRIGIDO 10/09 (achado pelo Rafael: rodape ainda mostrava "v1.0" preso,
+# nunca tinha acompanhado os bumps de VERSAO_APP - ficou defasado desde que
+# foi escrito em 04/09): em vez de string fixa separada, deriva direto de
+# VERSAO_APP (troca só o "v" pelo "v1." na frente) - fica sempre em dia
+# sozinho a cada bump, sem precisar lembrar de editar as 2 linhas. Quando
+# o Rafael decidir acompanhar a versao real (pos-lancamento), e' so trocar
+# essa linha pra VERSAO_EXIBIDA = VERSAO_APP.
+VERSAO_APP = "v22.3"
+VERSAO_EXIBIDA = f"v1.{VERSAO_APP.lstrip('v')} (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
 # Cores EnerMais (mesmo padrao do TIA.go, codigo real conferido antes de
