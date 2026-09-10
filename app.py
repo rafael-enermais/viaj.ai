@@ -139,7 +139,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v21.3"
+VERSAO_APP = "v21.4"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -2700,7 +2700,7 @@ FERRAMENTAS_VISUAIS_VIAJAI = {
 
 
 def pagina_chat(supabase):
-    st.subheader("Assistente Viaj.AI")
+    st.subheader("🤖 Viaj.AI")
     st.caption(
         "Converse em português sobre folgas, urgência, custo e histórico — só responde com "
         "dado real do Viaj.AI (nunca busca preço na internet nem inventa número). Já entende "
@@ -3755,7 +3755,7 @@ def main():
         st.write(f"Logado como: {st.session_state.usuario}")
         pagina = st.radio(
             "Navegação",
-            ["Importar RE090", "Confirmar folgas", "Urgências", "Previsão de folgas", "Custo & Passagens", "Dashboard", "Central de Ajuda", "Assistente"],
+            ["Importar RE090", "Confirmar folgas", "Urgências", "Previsão de folgas", "Custo & Passagens", "Dashboard", "Central de Ajuda", "🤖 Viaj.AI"],
         )
         if st.button("Sair"):
             supabase.auth.sign_out()
@@ -3797,7 +3797,7 @@ def main():
         pagina_dashboard(supabase)
     elif pagina == "Central de Ajuda":
         pagina_ajuda()
-    elif pagina == "Assistente":
+    elif pagina == "🤖 Viaj.AI":
         pagina_chat(supabase)
 
 
