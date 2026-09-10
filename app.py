@@ -139,7 +139,7 @@ MODEL_ID = "claude-sonnet-5"
 # melhor deixar como a versao 1 do projeto" ate o lancamento de verdade;
 # depois disso o Rafael decide quando essa string passa a acompanhar
 # VERSAO_APP de novo.
-VERSAO_APP = "v21.4"
+VERSAO_APP = "v22.0"
 VERSAO_EXIBIDA = "v1.0 (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1499,24 +1499,6 @@ def pagina_previsao(supabase):
                     "Troque de aba e volte (ou F5) pra ver a tabela reordenada com o novo nível."
                 )
 
-    st.divider()
-    st.subheader("Desvio de planejamento")
-    st.caption(
-        "Prevista x real, só datas. Positivo = atrasou em relação ao "
-        "previsto; negativo = antecipou. Quer ver isso já somado com o "
-        "custo em R$ (passagem + gastos) da mesma folga? Essa versão mais "
-        "completa está em **Custo & Passagens > Por folga > Comparativo de "
-        "custo x desvio de planejamento** — essa tabela aqui é só o atalho "
-        "rápido de datas."
-    )
-    desvio = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 200}).execute()
-    if desvio.data:
-        df_desvio = pd.DataFrame(desvio.data)
-        st.dataframe(df_desvio, use_container_width=True, hide_index=True, placeholder="")
-        _botao_exportar_excel(df_desvio, "viajai_desvio_planejamento.xlsx")
-    else:
-        st.caption("Nenhuma folga confirmada/realizada ainda pra comparar.")
-
 
 
 def pagina_custo_passagens(supabase):
@@ -1851,16 +1833,6 @@ def pagina_custo_passagens(supabase):
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao registrar gasto: {e}")
-
-        st.divider()
-        st.write("**Comparativo de custo x desvio de planejamento**")
-        comp = supabase.rpc("viajai_comparativo_custo_folga", {"p_limite": 200}).execute()
-        if comp.data:
-            df_comp = pd.DataFrame(comp.data)
-            st.dataframe(df_comp, hide_index=True, use_container_width=True, placeholder="")
-            _botao_exportar_excel(df_comp, "viajai_comparativo_custo.xlsx")
-        else:
-            st.caption("Nenhum custo registrado ainda pra comparar com o desvio de planejamento.")
 
     with aba_rapido:
         st.caption(
@@ -2700,7 +2672,7 @@ FERRAMENTAS_VISUAIS_VIAJAI = {
 
 
 def pagina_chat(supabase):
-    st.subheader("🤖 Viaj.AI")
+    st.subheader("Viaj.AI")
     st.caption(
         "Converse em português sobre folgas, urgência, custo e histórico — só responde com "
         "dado real do Viaj.AI (nunca busca preço na internet nem inventa número). Já entende "
@@ -3578,8 +3550,9 @@ def pagina_ajuda():
 2. **Confirmar folgas** — atualiza folga em aberto (status "prevista", "confirmada" ou "em_andamento") pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada" — inclusive folga que já tinha passagem comprada e depois foi vendida/cancelada.
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
 4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Aba "Por folga": adiciona trecho por trecho de uma mesma viagem (reenviar com o mesmo "Sentido" empilha na MESMA viagem, não cria outra) e dá pra marcar/desfazer reembolso de um trecho (some do gasto real, sem apagar o preço original). Aba "Lançamento rápido": dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome; também dá pra **vincular a uma folga específica** (opcional, tela e chat) — é o que faz essa passagem aparecer em "Passagem pra revisar" (Urgências) se a folga for vendida/cancelada depois.
-5. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — cobre passagem lançada tanto em "Lançamento rápido" quanto em "Por folga", desde que vinculada à folga; dá pra marcar como revisada, fica guardado num histórico permanente; e dá pra vincular um lançamento antigo "solto" a uma folga retroativamente), e os últimos erros registrados pelo sistema.
-6. **Assistente** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
+5. **Dashboard** — todas as métricas agregadas num só lugar: custo por mês, custo por obra, sazonalidade de folga, delay de envio do RE090, prazo de compra de passagem, e o desvio de planejamento (previsto x real, com e sem custo cruzado).
+6. **Urgências** — alertas: folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — cobre passagem lançada tanto em "Lançamento rápido" quanto em "Por folga", desde que vinculada à folga; dá pra marcar como revisada, fica guardado num histórico permanente; e dá pra vincular um lançamento antigo "solto" a uma folga retroativamente), e os últimos erros registrados pelo sistema.
+7. **Viaj.AI** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
 
 ### O que o Assistente pode / não pode fazer
 **Pode (com sua confirmação antes de gravar):**
@@ -3717,6 +3690,41 @@ def pagina_dashboard(supabase):
     else:
         st.caption("Ainda não há dado suficiente nesse período.")
 
+    # Reorganização 10/09: os 2 quadros de "desvio de planejamento" viviam
+    # espalhados (um em Previsão de folgas, outro em Custo & Passagens) -
+    # pedido do Rafael pra concentrar tudo que é "olhar métrica" aqui no
+    # Dashboard. Não usa o filtro de período (p_meses) acima porque as RPCs
+    # de origem (viajai_listar_folgas_desvio / viajai_comparativo_custo_folga)
+    # sempre trabalharam só com p_limite, sem filtro de mês - mantido assim
+    # pra não mudar a RPC nem o schema.
+    st.divider()
+    st.markdown("### 📆 Desvio de planejamento — previsto x real")
+    st.caption(
+        "Prevista x real, só datas. Positivo = atrasou em relação ao "
+        "previsto; negativo = antecipou."
+    )
+    desvio = supabase.rpc("viajai_listar_folgas_desvio", {"p_limite": 200}).execute()
+    if desvio.data:
+        df_desvio = pd.DataFrame(desvio.data)
+        st.dataframe(df_desvio, use_container_width=True, hide_index=True, placeholder="")
+        _botao_exportar_excel(df_desvio, "viajai_desvio_planejamento.xlsx")
+    else:
+        st.caption("Nenhuma folga confirmada/realizada ainda pra comparar.")
+
+    st.divider()
+    st.markdown("### 💳 Comparativo de custo x desvio de planejamento")
+    st.caption(
+        "Mesma comparação acima, cruzada com o custo real (passagem + "
+        "gastos) de cada folga."
+    )
+    comp = supabase.rpc("viajai_comparativo_custo_folga", {"p_limite": 200}).execute()
+    if comp.data:
+        df_comp = pd.DataFrame(comp.data)
+        st.dataframe(df_comp, hide_index=True, use_container_width=True, placeholder="")
+        _botao_exportar_excel(df_comp, "viajai_comparativo_custo.xlsx")
+    else:
+        st.caption("Nenhum custo registrado ainda pra comparar com o desvio de planejamento.")
+
 
 def main():
     if "sessao" not in st.session_state:
@@ -3755,7 +3763,7 @@ def main():
         st.write(f"Logado como: {st.session_state.usuario}")
         pagina = st.radio(
             "Navegação",
-            ["Importar RE090", "Confirmar folgas", "Urgências", "Previsão de folgas", "Custo & Passagens", "Dashboard", "Central de Ajuda", "🤖 Viaj.AI"],
+            ["Importar RE090", "Confirmar folgas", "Urgências", "Previsão de folgas", "Custo & Passagens", "Dashboard", "Central de Ajuda", "Viaj.AI"],
         )
         if st.button("Sair"):
             supabase.auth.sign_out()
@@ -3797,7 +3805,7 @@ def main():
         pagina_dashboard(supabase)
     elif pagina == "Central de Ajuda":
         pagina_ajuda()
-    elif pagina == "🤖 Viaj.AI":
+    elif pagina == "Viaj.AI":
         pagina_chat(supabase)
 
 
