@@ -144,7 +144,7 @@ MODEL_ID = "claude-sonnet-5"
 # sozinho a cada bump, sem precisar lembrar de editar as 2 linhas. Quando
 # o Rafael decidir acompanhar a versao real (pos-lancamento), e' so trocar
 # essa linha pra VERSAO_EXIBIDA = VERSAO_APP.
-VERSAO_APP = "v24.1"
+VERSAO_APP = "v24.2"
 VERSAO_EXIBIDA = f"v1.{VERSAO_APP.lstrip('v')} (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1589,7 +1589,23 @@ def pagina_confirmar_folgas(supabase):
             # v18.6: compara contra o status ORIGINAL de cada linha (base,
             # antes da edicao) - nao mais contra "prevista" fixo, ja que
             # agora uma linha pode comecar em 'confirmada'/'em_andamento'.
-            mudou = editado[editado["status_novo"] != base["status"]]
+            # BUGFIX v24.2 (pedido do Rafael 11/09: "setei novamente a data
+            # de saida e retorno REAL com a data certa e salvei, mas mesmo
+            # assim continua pegando essa data errada") - o filtro so'
+            # olhava status_novo != status atual. Se o status NAO mudou
+            # (ex.: folga ja estava "realizada" e o Rafael so' corrigiu a
+            # data errada, deixando o status igual), a linha nunca entrava
+            # em `mudou` e o RPC nem era chamado - a data corrigida era
+            # descartada em silencio, sem erro nenhum, e a tela seguia
+            # mostrando o valor antigo pra sempre. Agora tambem entra em
+            # `mudou` qualquer linha com data_saida_real/data_retorno_real/
+            # motivo_venda preenchidos, mesmo com status_novo == status.
+            mudou = editado[
+                (editado["status_novo"] != base["status"])
+                | (editado["data_saida_real"].notna())
+                | (editado["data_retorno_real"].notna())
+                | (editado["motivo_venda"].fillna("") != "")
+            ]
             if mudou.empty:
                 st.info("Nenhuma linha teve o status alterado — nada pra salvar.")
             else:
