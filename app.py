@@ -144,7 +144,7 @@ MODEL_ID = "claude-sonnet-5"
 # sozinho a cada bump, sem precisar lembrar de editar as 2 linhas. Quando
 # o Rafael decidir acompanhar a versao real (pos-lancamento), e' so trocar
 # essa linha pra VERSAO_EXIBIDA = VERSAO_APP.
-VERSAO_APP = "v24.2"
+VERSAO_APP = "v24.3"
 VERSAO_EXIBIDA = f"v1.{VERSAO_APP.lstrip('v')} (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1439,9 +1439,14 @@ def pagina_confirmar_folgas(supabase):
             st.error(f"Não consegui buscar as folgas concluídas (rodou o schema_v0.9 no Supabase?) — {e}")
         if fechadas_resp and fechadas_resp.data:
             _ids_ja_presentes = {int(l["folga_id"]) for l in linhas}
+            # v24.3: data_saida_real/data_retorno_real agora entram aqui tambem
+            # (ver ACHADO abaixo, no bloco que monta "base") - antes eram
+            # descartados aqui mesmo ja vindo preenchidos de
+            # viajai_listar_folgas_desvio.
             _colunas_comuns = [
                 "folga_id", "colaborador_id", "nome", "obra_nome", "canteiro_nome",
                 "status", "data_saida_prevista", "data_retorno_prevista",
+                "data_saida_real", "data_retorno_real",
                 "aguardando_vinculo_rh",
             ]
             for l in fechadas_resp.data:
@@ -1531,8 +1536,31 @@ def pagina_confirmar_folgas(supabase):
         # se estivesse "prevista" (errado) e qualquer status escolhido pareceria
         # uma "mudanca" mesmo sem ser.
         base["status_novo"] = base["status"]
-        base["data_saida_real"] = pd.NaT
-        base["data_retorno_real"] = pd.NaT
+        # BUGFIX v24.3 (achado investigando o relato do Rafael 11/09: "setei
+        # novamente a data de saida e retorno REAL... mas continua pegando
+        # essa data errada" - MESMO depois do fix v24.2 do filtro de salvar).
+        # Conferido direto no Supabase (folga #58): o valor real gravado
+        # (2026-09-16) e' o que foi salvo no PRIMEIRO save (junto com a
+        # mudanca de status pra "realizada", unico registro em
+        # historico_folga) - mas o `atualizado_em` da folga mostra uma 2a
+        # gravacao HOJE, mais tarde, sem novo registro de historico (ou
+        # seja, o fix v24.2 funcionou, o RPC RODOU de novo). Só que essas
+        # colunas eram SEMPRE reiniciadas em branco (`pd.NaT`) toda vez que a
+        # tela carregava, mesmo pra folga que ja tinha data real salva -
+        # diferente de "status_novo" (que sempre parte do status ATUAL). Se
+        # o Rafael reabriu a tela, viu a celula em branco (nao o 16/09
+        # salvo), e essa 2a tentativa de salvar nao tocou EXATAMENTE essa
+        # celula (ex.: editou outra coisa na mesma linha), o valor enviado
+        # pro RPC foi None - e' `coalesce(None, data_retorno_real)`, preserva
+        # o valor antigo sem avisar. Corrigido na raiz: as colunas agora
+        # partem do valor REAL ja salvo (igual status_novo parte do status
+        # atual) - só editar quem quiser mudar, e a comparacao de "mudou"
+        # abaixo passa a detectar mudanca de verdade, nao so' "preenchido".
+        for _col in ("data_saida_real", "data_retorno_real"):
+            if _col not in base.columns:
+                base[_col] = None  # nenhuma linha desta pagina trouxe o campo ainda
+        base["data_saida_real"] = pd.to_datetime(base["data_saida_real"], errors="coerce").dt.date
+        base["data_retorno_real"] = pd.to_datetime(base["data_retorno_real"], errors="coerce").dt.date
         base["motivo_venda"] = ""
 
         editado = st.data_editor(
@@ -1567,10 +1595,14 @@ def pagina_confirmar_folgas(supabase):
                     help="Deixa igual ao 'Status atual' pra não mexer nessa linha.",
                 ),
                 "data_saida_real": st.column_config.DateColumn(
-                    "✏️ Saída real", help="Preenche se marcou 'em_andamento' ou 'realizada'."
+                    "✏️ Saída real",
+                    help="Já mostra a data real salva, se tiver (v24.3). Preenche/corrige se marcou "
+                         "'em_andamento' ou 'realizada'.",
                 ),
                 "data_retorno_real": st.column_config.DateColumn(
-                    "✏️ Retorno real", help="Preenche se marcou 'realizada'."
+                    "✏️ Retorno real",
+                    help="Já mostra a data real salva, se tiver (v24.3). Preenche/corrige se marcou "
+                         "'realizada'.",
                 ),
                 "motivo_venda": st.column_config.TextColumn(
                     "✏️ Motivo (se vendida)", help="Opcional, só faz sentido se marcou 'vendida'."
@@ -1589,25 +1621,32 @@ def pagina_confirmar_folgas(supabase):
             # v18.6: compara contra o status ORIGINAL de cada linha (base,
             # antes da edicao) - nao mais contra "prevista" fixo, ja que
             # agora uma linha pode comecar em 'confirmada'/'em_andamento'.
-            # BUGFIX v24.2 (pedido do Rafael 11/09: "setei novamente a data
-            # de saida e retorno REAL com a data certa e salvei, mas mesmo
-            # assim continua pegando essa data errada") - o filtro so'
-            # olhava status_novo != status atual. Se o status NAO mudou
-            # (ex.: folga ja estava "realizada" e o Rafael so' corrigiu a
-            # data errada, deixando o status igual), a linha nunca entrava
-            # em `mudou` e o RPC nem era chamado - a data corrigida era
-            # descartada em silencio, sem erro nenhum, e a tela seguia
-            # mostrando o valor antigo pra sempre. Agora tambem entra em
-            # `mudou` qualquer linha com data_saida_real/data_retorno_real/
-            # motivo_venda preenchidos, mesmo com status_novo == status.
+            # BUGFIX v24.2 (pedido do Rafael 11/09, 1a parte): o filtro so'
+            # olhava status_novo != status atual - se o status nao mudasse,
+            # uma correcao de data sozinha nunca entrava em `mudou`.
+            # BUGFIX v24.3 (mesmo pedido, 2a parte, achado DEPOIS de
+            # confirmar no Supabase que o v24.2 ja' tinha corrigido o filtro
+            # mas o valor real digitado continuava sumindo): agora que
+            # data_saida_real/data_retorno_real partem PREENCHIDOS com o
+            # valor real ja salvo (em vez de sempre em branco - ver bloco
+            # que monta `base` acima), usar so' `.notna()` pra detectar
+            # "mudou" ia marcar TODA folga ja confirmada/realizada como
+            # alterada em TODO save, mesmo sem editar nada (RPC chamado a
+            # toa em cada linha, toda vez). Comparacao agora e' contra o
+            # valor ORIGINAL de cada linha (igual status_novo != status),
+            # usando `_grid_data_iso` pra comparar datas com seguranca
+            # (mesma celula pode voltar como `date` ou como string do
+            # data_editor - ja usado no grid de trechos, v24.1).
+            _saida_real_mudou = editado["data_saida_real"].apply(_grid_data_iso) != base["data_saida_real"].apply(_grid_data_iso)
+            _retorno_real_mudou = editado["data_retorno_real"].apply(_grid_data_iso) != base["data_retorno_real"].apply(_grid_data_iso)
             mudou = editado[
                 (editado["status_novo"] != base["status"])
-                | (editado["data_saida_real"].notna())
-                | (editado["data_retorno_real"].notna())
-                | (editado["motivo_venda"].fillna("") != "")
+                | _saida_real_mudou
+                | _retorno_real_mudou
+                | (editado["motivo_venda"].fillna("") != base["motivo_venda"].fillna(""))
             ]
             if mudou.empty:
-                st.info("Nenhuma linha teve o status alterado — nada pra salvar.")
+                st.info("Nenhuma linha teve status/data/motivo alterado — nada pra salvar.")
             else:
                 erros = 0
                 for _, linha in mudou.iterrows():
@@ -1615,14 +1654,8 @@ def pagina_confirmar_folgas(supabase):
                         supabase.rpc("viajai_atualizar_folga", {
                             "p_folga_id": int(linha["folga_id"]),
                             "p_status": linha["status_novo"],
-                            "p_data_saida_real": (
-                                linha["data_saida_real"].isoformat()
-                                if pd.notna(linha["data_saida_real"]) else None
-                            ),
-                            "p_data_retorno_real": (
-                                linha["data_retorno_real"].isoformat()
-                                if pd.notna(linha["data_retorno_real"]) else None
-                            ),
+                            "p_data_saida_real": _grid_data_iso(linha["data_saida_real"]),
+                            "p_data_retorno_real": _grid_data_iso(linha["data_retorno_real"]),
                             "p_motivo_venda": linha["motivo_venda"] or None,
                         }).execute()
                     except Exception as e:
