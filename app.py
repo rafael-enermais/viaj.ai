@@ -144,7 +144,7 @@ MODEL_ID = "claude-sonnet-5"
 # sozinho a cada bump, sem precisar lembrar de editar as 2 linhas. Quando
 # o Rafael decidir acompanhar a versao real (pos-lancamento), e' so trocar
 # essa linha pra VERSAO_EXIBIDA = VERSAO_APP.
-VERSAO_APP = "v23.2"
+VERSAO_APP = "v24.0"
 VERSAO_EXIBIDA = f"v1.{VERSAO_APP.lstrip('v')} (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -2153,148 +2153,153 @@ def pagina_custo_passagens(supabase):
             folga_id_sel = int(df_folgas.loc[df_folgas["rotulo"] == escolha, "folga_id"].iloc[0])
 
             viagens_resp = supabase.rpc("viajai_listar_viagens_folga", {"p_folga_id": folga_id_sel}).execute()
-            st.write("**Trechos já registrados:**")
-            if viagens_resp.data:
-                df_viagens = pd.DataFrame(viagens_resp.data)
-                st.caption(
-                    "Agrupado por viagem — 'ida' e 'volta' são 2 viagens "
-                    "separadas; cada uma pode ter vários trechos (paradas) "
-                    "na mesma viagem, um embaixo do outro na ordem que foram "
-                    "adicionados."
-                )
-                _status_por_viagem = {}
-                for (_sent, _vid), _grupo in df_viagens.groupby(["sentido", "viagem_id"], sort=False):
-                    _n_trechos = int(_grupo["trecho_id"].notna().sum())
-                    _status_atual = _grupo["viagem_status"].iloc[0] if "viagem_status" in _grupo.columns else None
-                    _status_por_viagem[int(_vid)] = (_sent, _status_atual)
-                    _rotulo_status = f" — status: {_status_atual}" if _status_atual else ""
-                    st.write(f"Viagem de **{_sent}** — {_n_trechos} trecho(s){_rotulo_status}")
-                    st.dataframe(
-                        _grupo.drop(columns=["sentido", "viagem_id"]),
-                        hide_index=True, use_container_width=True, placeholder="",
-                    )
-                # NOVO v23.1 (pedido do Rafael 11/09: viagem criada com
-                # status errado, "consigo arrumar?") - RPC
-                # viajai_atualizar_viagem_status ja existia desde o
-                # schema_v0.2 mas nunca tinha botao na tela - so' UI nova,
-                # sem SQL novo.
-                if _status_por_viagem:
-                    with st.expander("✏️ Corrigir status de uma viagem (ida/volta)"):
-                        st.caption(
-                            "Pra quando a viagem foi criada/atualizada com o status "
-                            "errado (ex.: ficou 'planejada' mas já foi comprada) — "
-                            "só muda o status da viagem, não mexe nos trechos/preços "
-                            "já lançados nela."
-                        )
-                        _opcoes_viagem_status = {
-                            f"Viagem de {v[0]} (nº {vid}) — atual: {v[1] or '—'}": vid
-                            for vid, v in _status_por_viagem.items()
-                        }
-                        with st.form("form_corrigir_status_viagem"):
-                            viagem_status_sel = st.selectbox(
-                                "Viagem", list(_opcoes_viagem_status.keys()), key="corrigir_status_viagem_sel",
-                            )
-                            novo_status_viagem = st.selectbox(
-                                "Novo status", ["planejada", "comprada", "alterada", "cancelada"],
-                                key="corrigir_status_viagem_novo",
-                            )
-                            enviar_status_viagem = st.form_submit_button("Corrigir status")
-                        if enviar_status_viagem:
-                            try:
-                                supabase.rpc("viajai_atualizar_viagem_status", {
-                                    "p_viagem_id": _opcoes_viagem_status[viagem_status_sel],
-                                    "p_status": novo_status_viagem,
-                                }).execute()
-                                _flash("success", "Status da viagem corrigido.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Erro ao corrigir status: {e}")
-            else:
-                st.caption("Nenhum trecho registrado ainda pra essa folga.")
+            _dados_viagens = viagens_resp.data or []
 
+            # NOVO v23.3 (pedido do Rafael 11/09, depois de eu confirmar
+            # viabilidade: "Sim concordo, pode implementar") - troca o
+            # formulario de 1 trecho por vez por um grid editavel (linha
+            # por trecho), com possibilidade de adicionar/remover linha e
+            # editar um trecho ja lancado - RPCs novas viajai_atualizar_
+            # trecho/viajai_apagar_trecho (schema_v0.42, nao existiam
+            # antes). Reembolso continua SEPARADO de proposito (decisao
+            # combinada com o Rafael) - misturar no grid arriscava
+            # reembolsar sem querer editando outra coisa.
+            st.write("**Trechos por viagem (editável):**")
+            st.caption(
+                "'ida' e 'volta' são 2 viagens separadas, cada uma com sua "
+                "própria lista de trechos (paradas). Edita direto na "
+                "tabela: muda um campo, adiciona linha no fim (ícone "
+                "'+') ou remove uma linha (seleciona e aperta a "
+                "lixeira) — depois clica em **Salvar**. Linha sem "
+                "Origem/Destino preenchidos é ignorada ao salvar."
+            )
+            _COLUNAS_TRECHO_GRID = [
+                "trecho_id", "origem", "destino", "modal", "data", "preco",
+                "km", "fornecedor", "duracao_horas", "data_compra", "observacao",
+            ]
+            _STATUS_VIAGEM_OPCOES = ["planejada", "comprada", "alterada", "cancelada", "realizada"]
+            _viagens_ja_com_trecho_ids = {}
+            for sentido in ["ida", "volta"]:
+                st.divider()
+                _trechos_sentido = [
+                    v for v in _dados_viagens if v["sentido"] == sentido and v.get("trecho_id") is not None
+                ]
+                _viagem_existente = next((v for v in _dados_viagens if v["sentido"] == sentido), None)
+                _viagem_id_atual = _viagem_existente["viagem_id"] if _viagem_existente else None
+                _status_atual = _viagem_existente.get("viagem_status") if _viagem_existente else None
+
+                col_tit, col_status, col_btn_status = st.columns([3, 2, 1])
+                col_tit.write(
+                    f"**Viagem de {sentido}** — {len(_trechos_sentido)} trecho(s)"
+                    + (f" — status: {_status_atual}" if _status_atual else " — ainda não criada")
+                )
+                if _viagem_id_atual is not None:
+                    _idx_status = (
+                        _STATUS_VIAGEM_OPCOES.index(_status_atual) if _status_atual in _STATUS_VIAGEM_OPCOES else 0
+                    )
+                    novo_status_sel = col_status.selectbox(
+                        "Status", _STATUS_VIAGEM_OPCOES, index=_idx_status,
+                        key=f"status_viagem_{sentido}", label_visibility="collapsed",
+                    )
+                    if col_btn_status.button("Salvar", key=f"btn_status_{sentido}") and novo_status_sel != _status_atual:
+                        try:
+                            supabase.rpc("viajai_atualizar_viagem_status", {
+                                "p_viagem_id": _viagem_id_atual, "p_status": novo_status_sel,
+                            }).execute()
+                            _flash("success", "Status da viagem atualizado.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao atualizar status: {e}")
+
+                if _trechos_sentido:
+                    df_base_trecho = pd.DataFrame(_trechos_sentido).sort_values("ordem")[_COLUNAS_TRECHO_GRID].reset_index(drop=True)
+                    df_base_trecho["data"] = pd.to_datetime(df_base_trecho["data"]).dt.date
+                    df_base_trecho["data_compra"] = pd.to_datetime(df_base_trecho["data_compra"]).dt.date
+                else:
+                    df_base_trecho = pd.DataFrame(columns=_COLUNAS_TRECHO_GRID)
+
+                editado_trecho = st.data_editor(
+                    df_base_trecho,
+                    num_rows="dynamic",
+                    column_order=[
+                        "origem", "destino", "modal", "data", "preco",
+                        "km", "fornecedor", "duracao_horas", "data_compra", "observacao",
+                    ],
+                    column_config={
+                        "trecho_id": None,
+                        "origem": st.column_config.TextColumn("Origem", required=True),
+                        "destino": st.column_config.TextColumn("Destino", required=True),
+                        "modal": st.column_config.SelectboxColumn(
+                            "Modal", options=["aviao", "onibus", "carro", "taxi", "outro"], required=True,
+                        ),
+                        "data": st.column_config.DateColumn("Data da viagem"),
+                        "preco": st.column_config.NumberColumn("Preço (R$)", min_value=0.0, format="%.2f"),
+                        "km": st.column_config.NumberColumn("Km", min_value=0.0),
+                        "fornecedor": st.column_config.TextColumn("Fornecedor/companhia"),
+                        "duracao_horas": st.column_config.NumberColumn("Duração (h)", min_value=0.0, format="%.1f"),
+                        "data_compra": st.column_config.DateColumn("Data da compra"),
+                        "observacao": st.column_config.TextColumn("Observação"),
+                    },
+                    hide_index=True, use_container_width=True, placeholder="",
+                    key=f"editor_trechos_{sentido}_{folga_id_sel}",
+                )
+
+                if st.button(f"💾 Salvar trechos de {sentido}", key=f"salvar_trechos_{sentido}"):
+                    try:
+                        _originais_por_id = {int(t["trecho_id"]): t for t in _trechos_sentido}
+                        _ids_mantidos = set()
+                        _viagem_id_uso = _viagem_id_atual
+                        _ordem_seq = 0
+                        for _, linha in editado_trecho.iterrows():
+                            _origem_l = str(linha.get("origem") or "").strip()
+                            _destino_l = str(linha.get("destino") or "").strip()
+                            if not _origem_l or not _destino_l:
+                                continue  # linha vazia/incompleta - ignora, nao salva nem apaga
+                            _ordem_seq += 1
+                            _tid_raw = linha.get("trecho_id")
+                            _tid = int(_tid_raw) if pd.notna(_tid_raw) else None
+                            _params_trecho = {
+                                "p_ordem": _ordem_seq,
+                                "p_origem": _origem_l,
+                                "p_destino": _destino_l,
+                                "p_modal": linha.get("modal") or "outro",
+                                "p_km": float(linha["km"]) if pd.notna(linha.get("km")) else None,
+                                "p_data": linha["data"].isoformat() if pd.notna(linha.get("data")) else None,
+                                "p_preco": float(linha["preco"]) if pd.notna(linha.get("preco")) else None,
+                                "p_fornecedor": (str(linha["fornecedor"]).strip() or None) if pd.notna(linha.get("fornecedor")) else None,
+                                "p_observacao": (str(linha["observacao"]).strip() or None) if pd.notna(linha.get("observacao")) else None,
+                                "p_duracao_horas": float(linha["duracao_horas"]) if pd.notna(linha.get("duracao_horas")) else None,
+                                "p_data_compra": linha["data_compra"].isoformat() if pd.notna(linha.get("data_compra")) else None,
+                            }
+                            if _tid is None:
+                                if _viagem_id_uso is None:
+                                    nova_viagem = supabase.rpc("viajai_criar_viagem", {
+                                        "p_folga_id": folga_id_sel, "p_sentido": sentido,
+                                    }).execute()
+                                    _viagem_id_uso = nova_viagem.data
+                                supabase.rpc("viajai_adicionar_trecho", {
+                                    "p_viagem_id": _viagem_id_uso, **_params_trecho,
+                                }).execute()
+                            else:
+                                _ids_mantidos.add(_tid)
+                                supabase.rpc("viajai_atualizar_trecho", {
+                                    "p_trecho_id": _tid, **_params_trecho,
+                                }).execute()
+                        for _tid_antigo in _originais_por_id:
+                            if _tid_antigo not in _ids_mantidos:
+                                supabase.rpc("viajai_apagar_trecho", {"p_trecho_id": _tid_antigo}).execute()
+                        _flash("success", f"Trechos de {sentido} salvos.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao salvar trechos de {sentido} — rodou o schema_v0.42 no Supabase? — {e}")
+
+            st.divider()
             gastos_resp = supabase.rpc("viajai_listar_gastos_folga", {"p_folga_id": folga_id_sel}).execute()
             st.write("**Gastos extras já registrados:**")
             if gastos_resp.data:
                 st.dataframe(pd.DataFrame(gastos_resp.data), hide_index=True, use_container_width=True, placeholder="")
             else:
                 st.caption("Nenhum gasto extra registrado ainda.")
-
-            st.write("**Adicionar trecho (passagem/perna da viagem)**")
-            sentido = st.selectbox("Sentido", ["ida", "volta"], key="trecho_sentido_select")
-            _trechos_do_sentido = [
-                v for v in (viagens_resp.data or [])
-                if v["sentido"] == sentido and v.get("trecho_id") is not None
-            ]
-            if _trechos_do_sentido:
-                st.info(
-                    f"➡️ Já existe uma viagem de '{sentido}' com "
-                    f"{len(_trechos_do_sentido)} trecho(s) (veja acima). O que "
-                    f"você preencher abaixo vira o trecho {len(_trechos_do_sentido) + 1} "
-                    f"dessa MESMA viagem — não cria uma viagem nova. Pra "
-                    f"registrar como outra viagem, muda o 'Sentido' acima."
-                )
-            else:
-                st.caption(f"➡️ Ainda não existe viagem de '{sentido}' pra essa folga — isso vai criar a primeira.")
-            # Origem/Destino ficam FORA do form de propósito (selectbox
-            # dentro de form so' reage no submit - ver _input_cidade_com_sugestao).
-            c3, c4 = st.columns(2)
-            origem_t = _input_cidade_com_sugestao(c3, "Origem", "trecho_origem", cidades_usadas)
-            destino_t = _input_cidade_com_sugestao(c4, "Destino", "trecho_destino", cidades_usadas)
-            with st.form("form_add_trecho"):
-                st.caption("Só o essencial aqui — o resto é opcional, fica em 'Mais detalhes'.")
-                c1, c2 = st.columns(2)
-                modal = c1.selectbox("Modal", ["aviao", "onibus", "carro", "taxi", "outro"])
-                data_t = c2.date_input("Data da viagem", value=date.today(), key="trecho_data")
-                preco_t = st.number_input("Preço (R$)", min_value=0.0, step=0.01, format="%.2f")
-
-                with st.expander("Mais detalhes (opcional)"):
-                    c7, c8 = st.columns(2)
-                    fornecedor_t = c7.text_input("Fornecedor/companhia", key="trecho_fornecedor")
-                    duracao_t = c8.number_input("Duração (horas)", min_value=0.0, step=0.5, format="%.1f")
-                    c9, c10 = st.columns(2)
-                    km_t = c9.number_input("Km (útil pra carro)", min_value=0.0, step=1.0)
-                    data_compra_t = c10.date_input(
-                        "Data da compra (se diferente de hoje)", value=None, key="trecho_data_compra",
-                    )
-                    obs_t = st.text_input("Observação", key="trecho_obs")
-
-                enviar_trecho = st.form_submit_button("Adicionar trecho")
-
-            if enviar_trecho:
-                if not origem_t or not destino_t:
-                    st.error("Preenche origem e destino.")
-                else:
-                    viagem_id = None
-                    maior_ordem = 0
-                    for v in (viagens_resp.data or []):
-                        if v["sentido"] == sentido:
-                            viagem_id = v["viagem_id"]
-                            if v.get("ordem") and v["ordem"] > maior_ordem:
-                                maior_ordem = v["ordem"]
-                    try:
-                        if viagem_id is None:
-                            nova_viagem = supabase.rpc("viajai_criar_viagem", {
-                                "p_folga_id": folga_id_sel, "p_sentido": sentido,
-                            }).execute()
-                            viagem_id = nova_viagem.data
-                        supabase.rpc("viajai_adicionar_trecho", {
-                            "p_viagem_id": viagem_id,
-                            "p_ordem": maior_ordem + 1,
-                            "p_origem": origem_t,
-                            "p_destino": destino_t,
-                            "p_modal": modal,
-                            "p_km": km_t or None,
-                            "p_data": data_t.isoformat() if data_t else None,
-                            "p_preco": preco_t or None,
-                            "p_fornecedor": fornecedor_t or None,
-                            "p_observacao": obs_t or None,
-                            "p_duracao_horas": duracao_t or None,
-                            "p_data_compra": data_compra_t.isoformat() if data_compra_t else None,
-                        }).execute()
-                        _flash("success", "Trecho adicionado.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao adicionar trecho: {e}")
 
             # Reembolso (schema_v0.30) - pedido do Rafael 08/09: passagem
             # comprada mas depois reembolsada pela companhia, precisava de
@@ -4187,9 +4192,9 @@ def pagina_ajuda():
         """
 ### Fluxo geral
 1. **Importar RE090** — carrega os dados de folga/deslocamento da planilha oficial pro banco. Sem match 1:1 com o RH, a folga é criada mesmo assim (não trava nada), com o selo "⏳ aguardando vínculo com RH" e nome provisório — dá pra vincular na mesma tela (manual, escolhendo o colaborador certo) ou clicar **"Tentar vincular automaticamente"** quando o RH cadastrar/ativar a pessoa; passado 60 dias sem vincular, vira alerta em Urgências. Também dá pra **adicionar folga manualmente** (sem esperar planilha) na mesma página, pra demanda emergencial.
-2. **Confirmar folgas** — atualiza folga em aberto (status "prevista", "confirmada" ou "em_andamento") pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada" — inclusive folga que já tinha passagem comprada e depois foi vendida/cancelada.
+2. **Confirmar folgas** — atualiza folga em aberto (status "prevista", "confirmada" ou "em_andamento") pra "confirmada" (data marcada, ainda não saiu), "em_andamento" (já saiu), "realizada" (já voltou), "vendida" (converteu os dias em pagamento, não saiu) ou "cancelada" — inclusive folga que já tinha passagem comprada e depois foi vendida/cancelada. Tem também um expander **"Editar dados ou apagar uma folga específica"** — corrige data prevista/nome-obra provisório, ou apaga uma folga criada errada (só se ainda não tiver trecho/gasto lançado nela).
 3. **Previsão de folgas** — mostra quando cada colaborador sai de folga.
-4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Aba "Por folga": adiciona trecho por trecho de uma mesma viagem (reenviar com o mesmo "Sentido" empilha na MESMA viagem, não cria outra) e dá pra marcar/desfazer reembolso de um trecho (some do gasto real, sem apagar o preço original). Aba "Lançamento rápido": dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome; também dá pra **vincular a uma folga específica** (opcional, tela e chat) — é o que faz essa passagem aparecer em "Passagem pra revisar" (Urgências) se a folga for vendida/cancelada depois.
+4. **Custo & Passagens** — lançamento e histórico de compra de passagem. Aba "Por folga": grid editável de trechos por viagem (ida/volta) — adiciona linha, edita ou remove um trecho já lançado direto na tabela, e corrige o status da viagem (inclusive "realizada", pra retroativo) sem mexer nos preços; reembolso de um trecho continua num expander separado. Aba "Lançamento rápido": dá pra registrar sem apontar colaborador (mesmo sem o RH ter a pessoa ainda) usando um nome provisório, e depois **atribuir o colaborador real** quando o RH subir — o app já sugere o match pelo nome; também dá pra **vincular a uma folga específica** (opcional, tela e chat) — é o que faz essa passagem aparecer em "Passagem pra revisar" (Urgências) se a folga for vendida/cancelada depois.
 5. **Dashboard** — todas as métricas agregadas num só lugar: custo por mês, custo por obra, sazonalidade de folga, delay de envio do RE090, prazo de compra de passagem, e o desvio de planejamento (previsto x real, com e sem custo cruzado).
 6. **Urgências** — alertas: folga aguardando vínculo com RH há mais de 60 dias, folga chegando sem passagem lançada, preço fora do padrão da rota, passagem pra revisar (folga vendida/cancelada depois de já comprada — cobre passagem lançada tanto em "Lançamento rápido" quanto em "Por folga", desde que vinculada à folga; dá pra marcar como revisada, fica guardado num histórico permanente; e dá pra vincular um lançamento antigo "solto" a uma folga retroativamente), e os últimos erros registrados pelo sistema.
 7. **Viaj.AI** — chat que consulta e propõe ações nas telas acima. Nunca grava sozinho.
