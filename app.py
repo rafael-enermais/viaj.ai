@@ -144,7 +144,7 @@ MODEL_ID = "claude-sonnet-5"
 # sozinho a cada bump, sem precisar lembrar de editar as 2 linhas. Quando
 # o Rafael decidir acompanhar a versao real (pos-lancamento), e' so trocar
 # essa linha pra VERSAO_EXIBIDA = VERSAO_APP.
-VERSAO_APP = "v24.0"
+VERSAO_APP = "v24.1"
 VERSAO_EXIBIDA = f"v1.{VERSAO_APP.lstrip('v')} (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -323,6 +323,40 @@ def _link_clickbus(origem_cidade, origem_uf, destino_cidade, destino_uf):
         "link_clickbus": url,
         "aviso": "Link nao inclui data - escolha a data direto na pagina do ClickBus.",
     }
+
+
+def _grid_data_iso(valor):
+    """NOVO v24.1 (bugfix achado pelo Rafael 11/09: 'Tentei salvar trecho
+    de volta deu erro' - 'str' object has no attribute 'isoformat').
+    Uma celula de data vinda do st.data_editor pode chegar em formatos
+    diferentes dependendo se a linha ja existia (convertida antes pra
+    datetime.date) ou foi digitada agora numa linha nova (pode virar
+    string 'YYYY-MM-DD' em vez de date, dependendo do estado da coluna) -
+    normaliza qualquer um dos formatos pra string ISO (ou None), sem
+    assumir type nenhum na hora de montar o parametro da RPC."""
+    if valor is None:
+        return None
+    try:
+        if pd.isna(valor):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(valor, str):
+        valor = valor.strip()
+        if not valor:
+            return None
+        try:
+            return datetime.strptime(valor[:10], "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return None
+    if hasattr(valor, "date") and callable(getattr(valor, "date", None)):
+        try:
+            valor = valor.date()
+        except Exception:
+            pass
+    if hasattr(valor, "isoformat"):
+        return valor.isoformat()
+    return None
 
 
 def _filtrar_dash_multi_viajai(itens):
@@ -1592,10 +1626,20 @@ def pagina_confirmar_folgas(supabase):
         # errado, e nao existia NENHUMA forma de apagar uma folga criada
         # por engano (nem RPC, nem botao).
         with st.expander("✏️🗑️ Editar dados ou apagar uma folga específica"):
+            # NOVO v24.1 (pedido do Rafael 11/09: "consegue reordenar p
+            # nome ficar primeiro? Pra ficar em ordem alfabetica e nao
+            # por #numero") - lista ordena por nome agora (nao mais na
+            # ordem crua de "situacao"/"data_saida_prevista" que `base` ja
+            # vinha ordenada antes); rotulo tb passa a mostrar o nome
+            # primeiro. O "#numero" é o folga_id (chave própria da folga
+            # no banco, auto-incremento, o mesmo número usado em Custo &
+            # Passagens e em qualquer outra tela/RPC que referencia essa
+            # folga) - não é matrícula nem nenhum dado do RH.
+            _base_editar_ordenada = base.sort_values("nome", na_position="last")
             _opcoes_editar_folga = {
-                f"#{int(r['folga_id'])} — {r['nome']} — {r['status']} — "
+                f"{r['nome']} — #{int(r['folga_id'])} — {r['status']} — "
                 f"saída {r['data_saida_prevista'] or '—'}": int(r["folga_id"])
-                for _, r in base.iterrows()
+                for _, r in _base_editar_ordenada.iterrows()
             }
             folga_edit_sel = st.selectbox(
                 "Folga", list(_opcoes_editar_folga.keys()), key="folga_editar_dados_sel",
@@ -2216,7 +2260,22 @@ def pagina_custo_passagens(supabase):
                     df_base_trecho["data"] = pd.to_datetime(df_base_trecho["data"]).dt.date
                     df_base_trecho["data_compra"] = pd.to_datetime(df_base_trecho["data_compra"]).dt.date
                 else:
-                    df_base_trecho = pd.DataFrame(columns=_COLUNAS_TRECHO_GRID)
+                    # colunas de data com dtype explicito (nao so' "object"
+                    # vazio) - ajuda o data_editor a manter o seletor de
+                    # data mesmo numa linha nova adicionada do zero.
+                    df_base_trecho = pd.DataFrame({
+                        "trecho_id": pd.array([], dtype="Int64"),
+                        "origem": pd.array([], dtype="object"),
+                        "destino": pd.array([], dtype="object"),
+                        "modal": pd.array([], dtype="object"),
+                        "data": pd.array([], dtype="datetime64[ns]"),
+                        "preco": pd.array([], dtype="float64"),
+                        "km": pd.array([], dtype="float64"),
+                        "fornecedor": pd.array([], dtype="object"),
+                        "duracao_horas": pd.array([], dtype="float64"),
+                        "data_compra": pd.array([], dtype="datetime64[ns]"),
+                        "observacao": pd.array([], dtype="object"),
+                    })[_COLUNAS_TRECHO_GRID]
 
                 editado_trecho = st.data_editor(
                     df_base_trecho,
@@ -2264,12 +2323,12 @@ def pagina_custo_passagens(supabase):
                                 "p_destino": _destino_l,
                                 "p_modal": linha.get("modal") or "outro",
                                 "p_km": float(linha["km"]) if pd.notna(linha.get("km")) else None,
-                                "p_data": linha["data"].isoformat() if pd.notna(linha.get("data")) else None,
+                                "p_data": _grid_data_iso(linha.get("data")),
                                 "p_preco": float(linha["preco"]) if pd.notna(linha.get("preco")) else None,
                                 "p_fornecedor": (str(linha["fornecedor"]).strip() or None) if pd.notna(linha.get("fornecedor")) else None,
                                 "p_observacao": (str(linha["observacao"]).strip() or None) if pd.notna(linha.get("observacao")) else None,
                                 "p_duracao_horas": float(linha["duracao_horas"]) if pd.notna(linha.get("duracao_horas")) else None,
-                                "p_data_compra": linha["data_compra"].isoformat() if pd.notna(linha.get("data_compra")) else None,
+                                "p_data_compra": _grid_data_iso(linha.get("data_compra")),
                             }
                             if _tid is None:
                                 if _viagem_id_uso is None:
