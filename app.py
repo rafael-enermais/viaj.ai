@@ -144,7 +144,7 @@ MODEL_ID = "claude-sonnet-5"
 # sozinho a cada bump, sem precisar lembrar de editar as 2 linhas. Quando
 # o Rafael decidir acompanhar a versao real (pos-lancamento), e' so trocar
 # essa linha pra VERSAO_EXIBIDA = VERSAO_APP.
-VERSAO_APP = "v23.0"
+VERSAO_APP = "v23.2"
 VERSAO_EXIBIDA = f"v1.{VERSAO_APP.lstrip('v')} (pré-lançamento)"
 CONTATO_SUPORTE = "rafael.nakahara@enermais.com.br"
 
@@ -1056,14 +1056,6 @@ def pagina_importar_re090(supabase):
     # secao concentra as 3 acoes possiveis sobre ela: vincular na mao,
     # tentar vincular sozinho (todas de uma vez), ou so' revisar/deixar pro
     # alerta de +60 dias em Urgencias.
-    st.subheader("⏳ Folgas aguardando vínculo com RH")
-    st.caption(
-        "Folga criada (via import ou manual) sem achar 1:1 no RH no momento — "
-        "não trava nada, a Amanda já pode lançar custo/trecho/status normalmente "
-        "usando o nome provisório. Some dessa lista sozinha assim que vincular "
-        "(manual abaixo, ou automático). Sem vincular há mais de 60 dias, "
-        "aparece um alerta separado em **Urgências**."
-    )
     try:
         # Junta viajai_listar_folgas_previstas (prevista/confirmada/em_andamento)
         # + viajai_listar_folgas_desvio (status <> 'prevista', cobre tambem
@@ -1090,6 +1082,15 @@ def pagina_importar_re090(supabase):
     except Exception as e:
         _folgas_provisorias = []
         st.error(f"Não consegui consultar (rodou o schema_v0.40 no Supabase?) — {e}")
+
+    st.subheader(f"⏳ Folgas aguardando vínculo com RH ({len(_folgas_provisorias)})")
+    st.caption(
+        "Folga criada (via import ou manual) sem achar 1:1 no RH no momento — "
+        "não trava nada, a Amanda já pode lançar custo/trecho/status normalmente "
+        "usando o nome provisório. Some dessa lista sozinha assim que vincular "
+        "(manual abaixo, ou automático). Sem vincular há mais de 60 dias, "
+        "aparece um alerta separado em **Urgências**."
+    )
 
     c_auto, c_info = st.columns([1, 3])
     if c_auto.button("🔄 Tentar vincular automaticamente"):
@@ -1584,6 +1585,89 @@ def pagina_confirmar_folgas(supabase):
 
         st.caption(f"{len(previstas.data or [])} folga(s) em aberto aguardando confirmação.")
 
+        # NOVO schema_v0.41 (pedido do Rafael 11/09: "era importante
+        # conseguir editar ou remover uma folga errada") - ate aqui so'
+        # dava pra editar status/datas REAIS (viajai_atualizar_folga,
+        # schema_v0.2) - faltava corrigir data PREVISTA/nome-obra digitado
+        # errado, e nao existia NENHUMA forma de apagar uma folga criada
+        # por engano (nem RPC, nem botao).
+        with st.expander("✏️🗑️ Editar dados ou apagar uma folga específica"):
+            _opcoes_editar_folga = {
+                f"#{int(r['folga_id'])} — {r['nome']} — {r['status']} — "
+                f"saída {r['data_saida_prevista'] or '—'}": int(r["folga_id"])
+                for _, r in base.iterrows()
+            }
+            folga_edit_sel = st.selectbox(
+                "Folga", list(_opcoes_editar_folga.keys()), key="folga_editar_dados_sel",
+            )
+            _id_edit_sel = _opcoes_editar_folga[folga_edit_sel]
+            _linha_sel = base.loc[base["folga_id"] == _id_edit_sel].iloc[0]
+            _eh_provisoria = pd.isna(_linha_sel.get("colaborador_id")) or not _linha_sel.get("colaborador_id")
+
+            st.write("**Editar datas / dados**")
+            st.caption(
+                "Corrige data prevista (ou nome/obra digitado errado, se ainda "
+                "for provisória) — não mexe em status nem em data real, isso "
+                "continua na tabela acima."
+            )
+            with st.form("form_editar_dados_folga"):
+                ce1, ce2 = st.columns(2)
+                nova_saida_prevista = ce1.date_input(
+                    "Saída prevista", value=_linha_sel.get("data_saida_prevista") or None,
+                    key="editar_folga_saida_prevista",
+                )
+                nova_retorno_prevista = ce2.date_input(
+                    "Retorno previsto", value=_linha_sel.get("data_retorno_prevista") or None,
+                    key="editar_folga_retorno_prevista",
+                )
+                if _eh_provisoria:
+                    st.caption("Folga ⏳ provisória — dá pra corrigir o nome/obra digitado errado também:")
+                    ce3, ce4 = st.columns(2)
+                    novo_nome_prov = ce3.text_input(
+                        "Nome (provisório)", value=_linha_sel.get("nome") or "", key="editar_folga_nome_prov",
+                    )
+                    novo_obra_prov = ce4.text_input(
+                        "Obra/canteiro (texto)", value=_linha_sel.get("obra_nome") or "", key="editar_folga_obra_prov",
+                    )
+                else:
+                    novo_nome_prov = None
+                    novo_obra_prov = None
+                enviar_editar_dados = st.form_submit_button("Salvar dados")
+            if enviar_editar_dados:
+                try:
+                    supabase.rpc("viajai_editar_dados_folga", {
+                        "p_folga_id": _id_edit_sel,
+                        "p_data_saida_prevista": nova_saida_prevista.isoformat() if nova_saida_prevista else None,
+                        "p_data_retorno_prevista": nova_retorno_prevista.isoformat() if nova_retorno_prevista else None,
+                        "p_nome_provisorio": novo_nome_prov or None,
+                        "p_obra_texto_provisorio": novo_obra_prov or None,
+                    }).execute()
+                    _flash("success", "Dados da folga atualizados.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao editar — rodou o schema_v0.41 no Supabase? — {e}")
+
+            st.divider()
+            st.write("**🗑️ Apagar folga (irreversível)**")
+            st.caption(
+                "Só apaga se essa folga ainda NÃO tiver trecho/viagem, gasto extra, "
+                "lançamento rápido vinculado nem revisão de passagem — nesses casos "
+                "o app avisa o que existe, pra você resolver aquilo primeiro (proteção "
+                "contra apagar custo real por engano). Sem nada disso, é uma folga "
+                "'limpa' (criada errada, sem uso ainda) — apaga direto, sem volta."
+            )
+            confirmar_apagar = st.checkbox(
+                f"Confirmo que quero apagar a folga #{_id_edit_sel} ({folga_edit_sel})",
+                key="confirmar_apagar_folga",
+            )
+            if st.button("Apagar folga", disabled=not confirmar_apagar):
+                try:
+                    supabase.rpc("viajai_apagar_folga", {"p_folga_id": _id_edit_sel}).execute()
+                    _flash("success", f"Folga #{_id_edit_sel} apagada.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Não apaguei — {e}")
+
     st.divider()
     st.subheader("Histórico")
     st.caption("Últimas mudanças registradas — quem, quando, o que mudou.")
@@ -1950,6 +2034,37 @@ def pagina_custo_passagens(supabase):
         else:
             st.caption("Preenche origem e destino (cidade ou código) pra habilitar o link.")
 
+        st.divider()
+        # NOVO v23.1 (pedido do Rafael 11/09: "falta uma opção aq p entrar
+        # no clickbus, só abre skyscanner") - usa o helper _link_clickbus
+        # que ja existia (so' pro chat) - diferente do Skyscanner, ClickBus
+        # exige cidade + UF separados (sem codigo tipo IATA), por isso sao
+        # 4 campos em vez de 2 - ver nota de "best-effort" em
+        # _slug_cidade_clickbus (link nao e' formato oficial documentado).
+        st.caption(
+            "Atalho pra abrir busca no ClickBus (ônibus) — diferente do "
+            "Skyscanner, aqui precisa cidade **e** UF de cada lado (sem "
+            "código tipo aeroporto); não tem como pré-preencher data, você "
+            "escolhe direto na página deles:"
+        )
+        cb1, cb2, cb3, cb4 = st.columns(4)
+        cb_origem_cidade = cb1.text_input("Origem (cidade)", key="cb_origem_cidade")
+        cb_origem_uf = cb2.text_input("Origem (UF)", key="cb_origem_uf", max_chars=2)
+        cb_destino_cidade = cb3.text_input("Destino (cidade)", key="cb_destino_cidade")
+        cb_destino_uf = cb4.text_input("Destino (UF)", key="cb_destino_uf", max_chars=2)
+        if cb_origem_cidade and cb_origem_uf and cb_destino_cidade and cb_destino_uf:
+            resultado_cb = _link_clickbus(cb_origem_cidade, cb_origem_uf, cb_destino_cidade, cb_destino_uf)
+            if resultado_cb.get("erro"):
+                st.caption(resultado_cb["erro"])
+            else:
+                st.link_button(
+                    f"🔗 Ver no ClickBus ({resultado_cb['origem']} → {resultado_cb['destino']})",
+                    resultado_cb["link_clickbus"],
+                )
+                st.caption(resultado_cb["aviso"])
+        else:
+            st.caption("Preenche cidade e UF dos dois lados pra habilitar o link.")
+
     with st.expander("🚗 Estimar por carro (Google Maps) *"):
         st.caption(
             "* Depende de uma configuração de faturamento no Google Cloud — "
@@ -2047,13 +2162,53 @@ def pagina_custo_passagens(supabase):
                     "na mesma viagem, um embaixo do outro na ordem que foram "
                     "adicionados."
                 )
+                _status_por_viagem = {}
                 for (_sent, _vid), _grupo in df_viagens.groupby(["sentido", "viagem_id"], sort=False):
                     _n_trechos = int(_grupo["trecho_id"].notna().sum())
-                    st.write(f"Viagem de **{_sent}** — {_n_trechos} trecho(s)")
+                    _status_atual = _grupo["viagem_status"].iloc[0] if "viagem_status" in _grupo.columns else None
+                    _status_por_viagem[int(_vid)] = (_sent, _status_atual)
+                    _rotulo_status = f" — status: {_status_atual}" if _status_atual else ""
+                    st.write(f"Viagem de **{_sent}** — {_n_trechos} trecho(s){_rotulo_status}")
                     st.dataframe(
                         _grupo.drop(columns=["sentido", "viagem_id"]),
                         hide_index=True, use_container_width=True, placeholder="",
                     )
+                # NOVO v23.1 (pedido do Rafael 11/09: viagem criada com
+                # status errado, "consigo arrumar?") - RPC
+                # viajai_atualizar_viagem_status ja existia desde o
+                # schema_v0.2 mas nunca tinha botao na tela - so' UI nova,
+                # sem SQL novo.
+                if _status_por_viagem:
+                    with st.expander("✏️ Corrigir status de uma viagem (ida/volta)"):
+                        st.caption(
+                            "Pra quando a viagem foi criada/atualizada com o status "
+                            "errado (ex.: ficou 'planejada' mas já foi comprada) — "
+                            "só muda o status da viagem, não mexe nos trechos/preços "
+                            "já lançados nela."
+                        )
+                        _opcoes_viagem_status = {
+                            f"Viagem de {v[0]} (nº {vid}) — atual: {v[1] or '—'}": vid
+                            for vid, v in _status_por_viagem.items()
+                        }
+                        with st.form("form_corrigir_status_viagem"):
+                            viagem_status_sel = st.selectbox(
+                                "Viagem", list(_opcoes_viagem_status.keys()), key="corrigir_status_viagem_sel",
+                            )
+                            novo_status_viagem = st.selectbox(
+                                "Novo status", ["planejada", "comprada", "alterada", "cancelada"],
+                                key="corrigir_status_viagem_novo",
+                            )
+                            enviar_status_viagem = st.form_submit_button("Corrigir status")
+                        if enviar_status_viagem:
+                            try:
+                                supabase.rpc("viajai_atualizar_viagem_status", {
+                                    "p_viagem_id": _opcoes_viagem_status[viagem_status_sel],
+                                    "p_status": novo_status_viagem,
+                                }).execute()
+                                _flash("success", "Status da viagem corrigido.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao corrigir status: {e}")
             else:
                 st.caption("Nenhum trecho registrado ainda pra essa folga.")
 
@@ -3686,48 +3841,6 @@ def pagina_urgencias(supabase):
         "import associado (criada antes da rastreabilidade ou por outro caminho)."
     )
 
-    # NOVO schema_v0.40 (Caminho A, confirmado pelo Rafael 10/09: "2. sim
-    # vamos deixar por 60 dias por enquanto") - substitui o antigo botao
-    # "Resolvida" de pendencia por um alerta baseado em tempo: folga sem
-    # vinculo com RH nunca fica esquecida pra sempre, so' vira alerta aqui
-    # depois de N dias. Acao (vincular manual/automatico) fica centralizada
-    # em Importar RE090, pra nao duplicar a mesma escrita em 2 telas.
-    st.subheader("⏳ Folgas aguardando vínculo com RH há mais de 60 dias")
-    st.caption(
-        "Nome provisório (import ou lançamento manual) que passou de 60 dias "
-        "sem achar match único no RH — não travou nada até aqui, mas merece "
-        "revisar (RH ainda não cadastrou a pessoa? nome está errado? pessoa "
-        "não existe mesmo?). Vincular manual ou tentar automático fica na "
-        "página **Importar RE090**."
-    )
-    try:
-        r0 = supabase.rpc("viajai_folgas_sem_vinculo_rh", {"p_dias": 60}).execute()
-        if r0.data:
-            st.dataframe(
-                pd.DataFrame(r0.data),
-                column_order=[
-                    "folga_id", "nome_provisorio", "obra_texto_provisorio",
-                    "origem_criacao", "status", "data_saida_prevista", "dias_sem_vinculo",
-                ],
-                column_config={
-                    "folga_id": st.column_config.NumberColumn("🔒 Nº", format="%d"),
-                    "nome_provisorio": st.column_config.TextColumn("🔒 Nome (provisório)"),
-                    "obra_texto_provisorio": st.column_config.TextColumn("🔒 Obra/canteiro (texto)"),
-                    "origem_criacao": st.column_config.TextColumn(
-                        "🔒 Origem", help="re090 = veio de import de planilha; manual = lançada direto na tela.",
-                    ),
-                    "status": st.column_config.TextColumn("🔒 Status"),
-                    "data_saida_prevista": st.column_config.DateColumn("🔒 Saída prevista"),
-                    "dias_sem_vinculo": st.column_config.NumberColumn("🔒 Dias sem vínculo"),
-                },
-                use_container_width=True, hide_index=True, placeholder="",
-            )
-        else:
-            st.success("Nenhuma folga passou de 60 dias sem vínculo com RH.")
-    except Exception as e:
-        st.error(f"Não consegui consultar (rodou o schema_v0.40 no Supabase?) — {e}")
-
-    st.divider()
     st.subheader("🚨 Folgas chegando sem passagem lançada")
     st.caption(
         "O que fazer: lance a passagem em **Custo & Passagens** (aba "
@@ -4020,6 +4133,52 @@ def pagina_urgencias(supabase):
             st.success("Nenhum erro registrado.")
     except Exception as e:
         st.error(f"Não consegui consultar (rodou o schema_v0.25 no Supabase?) — {e}")
+
+    # NOVO schema_v0.40 (Caminho A, confirmado pelo Rafael 10/09: "2. sim
+    # vamos deixar por 60 dias por enquanto") - substitui o antigo botao
+    # "Resolvida" de pendencia por um alerta baseado em tempo: folga sem
+    # vinculo com RH nunca fica esquecida pra sempre, so' vira alerta aqui
+    # depois de N dias. Acao (vincular manual/automatico) fica centralizada
+    # em Importar RE090, pra nao duplicar a mesma escrita em 2 telas.
+    # v23.1 (pedido do Rafael 11/09: "joga essa lista dos 60 dias por
+    # ultimo") - movida do topo da pagina pra cá (era a 1ª seção, virou a
+    # última), pra priorizar visualmente "folga chegando sem passagem" que
+    # é mais urgente no dia a dia que o alerta administrativo de 60 dias.
+    st.divider()
+    st.subheader("⏳ Folgas aguardando vínculo com RH há mais de 60 dias")
+    st.caption(
+        "Nome provisório (import ou lançamento manual) que passou de 60 dias "
+        "sem achar match único no RH — não travou nada até aqui, mas merece "
+        "revisar (RH ainda não cadastrou a pessoa? nome está errado? pessoa "
+        "não existe mesmo?). Vincular manual ou tentar automático fica na "
+        "página **Importar RE090**."
+    )
+    try:
+        r0 = supabase.rpc("viajai_folgas_sem_vinculo_rh", {"p_dias": 60}).execute()
+        if r0.data:
+            st.dataframe(
+                pd.DataFrame(r0.data),
+                column_order=[
+                    "folga_id", "nome_provisorio", "obra_texto_provisorio",
+                    "origem_criacao", "status", "data_saida_prevista", "dias_sem_vinculo",
+                ],
+                column_config={
+                    "folga_id": st.column_config.NumberColumn("🔒 Nº", format="%d"),
+                    "nome_provisorio": st.column_config.TextColumn("🔒 Nome (provisório)"),
+                    "obra_texto_provisorio": st.column_config.TextColumn("🔒 Obra/canteiro (texto)"),
+                    "origem_criacao": st.column_config.TextColumn(
+                        "🔒 Origem", help="re090 = veio de import de planilha; manual = lançada direto na tela.",
+                    ),
+                    "status": st.column_config.TextColumn("🔒 Status"),
+                    "data_saida_prevista": st.column_config.DateColumn("🔒 Saída prevista"),
+                    "dias_sem_vinculo": st.column_config.NumberColumn("🔒 Dias sem vínculo"),
+                },
+                use_container_width=True, hide_index=True, placeholder="",
+            )
+        else:
+            st.success("Nenhuma folga passou de 60 dias sem vínculo com RH.")
+    except Exception as e:
+        st.error(f"Não consegui consultar (rodou o schema_v0.40 no Supabase?) — {e}")
 
 
 def pagina_ajuda():
